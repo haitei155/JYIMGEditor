@@ -1,5 +1,7 @@
 import configparser
 import csv
+import ctypes
+import io
 import os
 import shutil
 import struct
@@ -11,10 +13,11 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
+from PIL import Image, ImageGrab
 
 
 APP_NAME = "金庸群侠传贴图资源编辑器"
-APP_VERSION = "v0.1"
+APP_VERSION = "v0.2"
 AUTHOR = "海底.zip"
 BG = "#307070"
 MAIN_WINDOW_EXTRA_WIDTH = 24
@@ -127,6 +130,49 @@ class Sprite:
 
 def clone_sprite(sprite):
     return Sprite(sprite.width, sprite.height, sprite.xoff, sprite.yoff, [row[:] for row in sprite.pixels])
+
+
+def blank_sprite():
+    return Sprite(1, 1, 0, 0, [[-1]])
+
+
+def anchor_offsets(old_w, old_h, new_w, new_h, anchor):
+    col = anchor % 3
+    row = anchor // 3
+    if col == 0:
+        old_x = new_x = 0
+    elif col == 1:
+        old_x = max(0, (old_w - new_w) // 2)
+        new_x = max(0, (new_w - old_w) // 2)
+    else:
+        old_x = max(0, old_w - new_w)
+        new_x = max(0, new_w - old_w)
+    if row == 0:
+        old_y = new_y = 0
+    elif row == 1:
+        old_y = max(0, (old_h - new_h) // 2)
+        new_y = max(0, (new_h - old_h) // 2)
+    else:
+        old_y = max(0, old_h - new_h)
+        new_y = max(0, new_h - old_h)
+    return old_x, old_y, new_x, new_y
+
+
+def resize_sprite(sprite, new_w, new_h, anchor=4):
+    new_w, new_h = max(1, int(new_w)), max(1, int(new_h))
+    old_x, old_y, new_x, new_y = anchor_offsets(sprite.width, sprite.height, new_w, new_h, anchor)
+    new_pixels = [[-1 for _ in range(new_w)] for _ in range(new_h)]
+    copy_w = min(sprite.width - old_x, new_w - new_x)
+    copy_h = min(sprite.height - old_y, new_h - new_y)
+    if copy_w > 0 and copy_h > 0:
+        for y in range(copy_h):
+            new_pixels[new_y + y][new_x:new_x + copy_w] = sprite.pixels[old_y + y][old_x:old_x + copy_w]
+    sprite.pixels = new_pixels
+    sprite.width = new_w
+    sprite.height = new_h
+    sprite.xoff += new_x - old_x
+    sprite.yoff += new_y - old_y
+    return sprite
 
 
 class Palette:
@@ -337,25 +383,87 @@ class ImageTools:
         photo.write(str(path), format="png")
 
     @staticmethod
-    def import_png(path: Path, palette: Palette, xoff=0, yoff=0) -> Sprite:
-        img = tk.PhotoImage(file=str(path))
-        w, h = img.width(), img.height()
+    def sprite_to_pil(sprite: Sprite, palette: Palette, show_offset=False):
+        img = Image.new("RGB", (max(1, sprite.width), max(1, sprite.height)), Palette.parse_hex(BG))
+        px = img.load()
+        for y, row in enumerate(sprite.pixels):
+            for x, idx in enumerate(row):
+                if idx >= 0:
+                    px[x, y] = tuple(palette.colors[idx])
+        if show_offset:
+            cx, cy = sprite.xoff, sprite.yoff
+            red = (255, 0, 0)
+            for x in range(max(0, cx - 8), min(sprite.width, cx + 9)):
+                if 0 <= cy < sprite.height:
+                    px[x, cy] = red
+            for y in range(max(0, cy - 8), min(sprite.height, cy + 9)):
+                if 0 <= cx < sprite.width:
+                    px[cx, y] = red
+        return img
+
+    @staticmethod
+    def pil_to_sprite(img, palette: Palette, xoff=0, yoff=0) -> Sprite:
+        img = img.convert("RGBA")
+        w, h = img.size
         pixels = []
         tr = palette.transparent_rgb
         for y in range(h):
             row = []
             for x in range(w):
-                got = img.get(x, y)
-                if isinstance(got, str):
-                    rgb = Palette.parse_hex(got)
-                else:
-                    rgb = tuple(int(v) for v in got[:3])
-                if rgb == tr:
+                r, g, b, a = img.getpixel((x, y))
+                if a == 0 or (r, g, b) == tr:
                     row.append(-1)
                 else:
-                    row.append(palette.nearest(rgb))
+                    row.append(palette.nearest((r, g, b)))
             pixels.append(row)
         return Sprite(w, h, xoff, yoff, pixels)
+
+    @staticmethod
+    def copy_sprite_to_clipboard(sprite: Sprite, palette: Palette, show_offset=False):
+        img = ImageTools.sprite_to_pil(sprite, palette, show_offset).convert("RGB")
+        output = io.BytesIO()
+        img.save(output, "BMP")
+        data = output.getvalue()[14:]
+        output.close()
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        gmem_moveable = 0x0002
+        cf_dib = 8
+        hglobal = kernel32.GlobalAlloc(gmem_moveable, len(data))
+        if not hglobal:
+            raise RuntimeError("无法分配剪贴板内存")
+        ptr = kernel32.GlobalLock(hglobal)
+        ctypes.memmove(ptr, data, len(data))
+        kernel32.GlobalUnlock(hglobal)
+        if not user32.OpenClipboard(None):
+            kernel32.GlobalFree(hglobal)
+            raise RuntimeError("无法打开剪贴板")
+        try:
+            user32.EmptyClipboard()
+            if not user32.SetClipboardData(cf_dib, hglobal):
+                raise RuntimeError("无法写入剪贴板")
+            hglobal = None
+        finally:
+            user32.CloseClipboard()
+            if hglobal:
+                kernel32.GlobalFree(hglobal)
+
+    @staticmethod
+    def sprite_from_clipboard(palette: Palette, xoff=0, yoff=0):
+        got = ImageGrab.grabclipboard()
+        if isinstance(got, Image.Image):
+            return ImageTools.pil_to_sprite(got, palette, xoff, yoff)
+        if isinstance(got, list) and got:
+            return ImageTools.import_png(Path(got[0]), palette, xoff, yoff)
+        raise ValueError("剪贴板中没有可读取的图片")
+
+    @staticmethod
+    def import_png(path: Path, palette: Palette, xoff=0, yoff=0) -> Sprite:
+        return ImageTools.pil_to_sprite(Image.open(path), palette, xoff, yoff)
 
 
 class SpriteEditWindow(tk.Toplevel):
@@ -363,7 +471,7 @@ class SpriteEditWindow(tk.Toplevel):
         super().__init__(app.root)
         self.app = app
         self.index = index
-        self.zoom = tk.IntVar(value=2)
+        self.zoom = tk.IntVar(value=4)
         self.show_offset = tk.BooleanVar(value=False)
         self.fixed_anchor = tk.BooleanVar(value=False)
         self.selected_color = tk.IntVar(value=0)
@@ -409,6 +517,8 @@ class SpriteEditWindow(tk.Toplevel):
         ttk.Button(left, text="上一张", command=self.prev_sprite).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="下一张", command=self.next_sprite).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="颜色转换", command=self.color_convert).pack(fill=tk.X, pady=3)
+        ttk.Button(left, text="从剪贴板复制", command=self.paste_from_clipboard).pack(fill=tk.X, pady=3)
+        ttk.Button(left, text="复制到剪贴板", command=self.copy_to_clipboard).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="保存图片", command=self.save_png).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="保存修改", command=self.apply_fields).pack(fill=tk.X, pady=3)
         ttk.Label(left, text="选择颜色").pack(anchor="w", pady=(8, 0))
@@ -681,6 +791,24 @@ class SpriteEditWindow(tk.Toplevel):
         if path:
             ImageTools.export_png(Path(path), self.sprite, self.app.palette, self.show_offset.get())
 
+    def copy_to_clipboard(self):
+        try:
+            ImageTools.copy_sprite_to_clipboard(self.sprite, self.app.palette, self.show_offset.get())
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e), parent=self)
+
+    def paste_from_clipboard(self):
+        try:
+            spr = self.sprite
+            pasted = ImageTools.sprite_from_clipboard(self.app.palette, spr.xoff, spr.yoff)
+            self.push_undo()
+            spr.width, spr.height, spr.pixels = pasted.width, pasted.height, pasted.pixels
+            self.mark_sprite_changed()
+            self.refresh()
+            self.app.draw_grid(clear_cache=False)
+        except Exception as e:
+            messagebox.showerror("粘贴失败", str(e), parent=self)
+
     def color_convert(self):
         ColorConvertWindow(self.app, self.index, self, self.selected_color.get())
 
@@ -910,11 +1038,41 @@ class OffsetDialog(simpledialog.Dialog):
         ttk.Entry(master, textvariable=self.dx, width=10).grid(row=0, column=1, padx=4, pady=4)
         ttk.Label(master, text="Y 相对调整").grid(row=1, column=0, sticky="w", padx=4, pady=4)
         ttk.Entry(master, textvariable=self.dy, width=10).grid(row=1, column=1, padx=4, pady=4)
-        ttk.Label(master, text="可输入 +2、2 或 -2").grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(master, text="可输入 +1、1 或 -1").grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
         return master
 
     def apply(self):
         self.result = (int(self.dx.get() or "0"), int(self.dy.get() or "0"))
+
+
+class ResizeDialog(simpledialog.Dialog):
+    def body(self, master):
+        self.title("批量修改宽度/高度")
+        self.width_var = tk.StringVar(value="")
+        self.height_var = tk.StringVar(value="")
+        self.absolute_var = tk.BooleanVar(value=False)
+        self.anchor_var = tk.IntVar(value=4)
+        ttk.Label(master, text="宽度").grid(row=0, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(master, textvariable=self.width_var, width=10).grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        ttk.Label(master, text="高度").grid(row=1, column=0, sticky="w", padx=4, pady=4)
+        ttk.Entry(master, textvariable=self.height_var, width=10).grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        ttk.Checkbutton(master, text="直接覆盖宽高（不勾选为相对增减）", variable=self.absolute_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=4)
+        ttk.Label(master, text="定位").grid(row=3, column=0, sticky="nw", padx=4, pady=4)
+        grid = ttk.Frame(master)
+        grid.grid(row=3, column=1, sticky="w", padx=4, pady=4)
+        labels = ["↖", "↑", "↗", "←", "●", "→", "↙", "↓", "↘"]
+        for i, text in enumerate(labels):
+            ttk.Radiobutton(grid, text=text, value=i, variable=self.anchor_var, width=3).grid(row=i // 3, column=i % 3, padx=1, pady=1)
+        ttk.Label(master, text="空值保持原值；相对模式支持 +1、1、-1").grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
+        return master
+
+    def apply(self):
+        self.result = {
+            "width": self.width_var.get().strip(),
+            "height": self.height_var.get().strip(),
+            "absolute": self.absolute_var.get(),
+            "anchor": int(self.anchor_var.get()),
+        }
 
 
 class App:
@@ -943,6 +1101,8 @@ class App:
         self.archive: JyPicArchive | None = None
         self.current_base = "pic"
         self.selection = set()
+        self.last_selected_index = None
+        self.sprite_clipboard = None
         self.thumb_refs = []
         self.thumb_cache = {}
         self.per_row = tk.IntVar(value=10)
@@ -1085,13 +1245,25 @@ class App:
         for label, cmd in [
             ("编辑贴图", self.edit_selected),
             ("颜色转换", self.color_convert_selected),
+            ("选中图片导出PNG", self.export_selected),
+            ("选中图片导入PNG", self.import_selected),
             ("批量调整X/Y偏移", self.batch_adjust_offset),
-            ("全部导出PNG", self.export_all),
-            ("全部导入PNG", self.import_folder),
+            ("批量修改宽度/高度", self.batch_resize_selected),
             ("删除选中贴图", self.delete_selected),
-            ("保存贴图", self.save_archive),
         ]:
             self.menu.add_command(label=label, command=cmd)
+        self.menu.add_separator()
+        for label, cmd in [
+            ("从剪贴板复制", self.paste_single_from_clipboard),
+            ("复制到剪贴板", self.copy_single_to_clipboard),
+            ("复制贴图(带偏移)", self.copy_sprite_with_offset),
+            ("粘贴贴图(带偏移)", self.paste_sprite_with_offset),
+            ("插入空白贴图", self.insert_blank_before),
+            ("添加空白贴图到最后", self.append_blank_sprite),
+        ]:
+            self.menu.add_command(label=label, command=cmd)
+        self.menu.add_separator()
+        self.menu.add_command(label="保存图片", command=self.save_archive)
 
     def fill_selected_file(self):
         idx = self.combo.current()
@@ -1221,13 +1393,18 @@ class App:
         if idx is None:
             return
         old_selection = set(self.selection)
-        if event.state & 0x0004:
+        if event.state & 0x0001 and self.last_selected_index is not None:
+            a, b = sorted((self.last_selected_index, idx))
+            self.selection.update(range(a, b + 1))
+        elif event.state & 0x0004:
             if idx in self.selection:
                 self.selection.remove(idx)
             else:
                 self.selection.add(idx)
+            self.last_selected_index = idx
         else:
             self.selection = {idx}
+            self.last_selected_index = idx
         if self.selection != old_selection:
             self.draw_grid(clear_cache=False)
 
@@ -1241,11 +1418,27 @@ class App:
         idx = self.index_at(event)
         if idx is not None and idx not in self.selection:
             self.selection = {idx}
+            self.last_selected_index = idx
             self.draw_grid(clear_cache=False)
+        self.update_menu_state()
         self.menu.tk_popup(event.x_root, event.y_root)
+
+    def update_menu_state(self):
+        count = len(self.selection)
+        single = count == 1
+        has_selection = count > 0
+        for label in ["选中图片导出PNG", "选中图片导入PNG", "批量调整X/Y偏移", "批量修改宽度/高度", "删除选中贴图"]:
+            self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
+        for label in ["从剪贴板复制", "复制到剪贴板", "复制贴图(带偏移)", "插入空白贴图"]:
+            self.menu.entryconfigure(label, state=tk.NORMAL if single else tk.DISABLED)
+        self.menu.entryconfigure("粘贴贴图(带偏移)", state=tk.NORMAL if single and self.sprite_clipboard else tk.DISABLED)
+        self.menu.entryconfigure("添加空白贴图到最后", state=tk.NORMAL if single else tk.DISABLED)
 
     def selected_index(self):
         return min(self.selection) if self.selection else 0
+
+    def selected_indices(self):
+        return sorted(self.selection)
 
     def edit_selected(self):
         if self.archive and self.archive.sprites:
@@ -1254,6 +1447,134 @@ class App:
     def color_convert_selected(self):
         if self.archive and self.archive.sprites:
             ColorConvertWindow(self, self.selected_index())
+
+    def export_selected(self):
+        if not self.archive or not self.selection:
+            return
+        root = filedialog.askdirectory(title="选择导出文件夹")
+        if not root:
+            return
+        outdir = Path(root) / f"{self.current_base}_selected"
+        outdir.mkdir(parents=True, exist_ok=True)
+        digits = max(2, len(str(len(self.archive.sprites) - 1)))
+        manifest = outdir / "manifest.csv"
+        with manifest.open("w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["index", "file", "width", "height", "xoff", "yoff"])
+            for i in self.selected_indices():
+                spr = self.archive.get_sprite(i)
+                name = f"{self.current_base}_{i:0{digits}d}.png"
+                ImageTools.export_png(outdir / name, spr, self.palette, False)
+                writer.writerow([i, name, spr.width, spr.height, spr.xoff, spr.yoff])
+        messagebox.showinfo("完成", f"已导出 {len(self.selection)} 张贴图到：\n{outdir}")
+
+    def import_selected(self):
+        if not self.archive or not self.selection:
+            return
+        folder = filedialog.askdirectory(title="选择PNG文件夹")
+        if not folder:
+            return
+        folder = Path(folder)
+        files = sorted(folder.glob("*.png"), key=lambda p: p.name.lower())
+        targets = self.selected_indices()
+        if len(files) < len(targets):
+            messagebox.showerror("导入失败", f"PNG 数量不足：需要 {len(targets)} 张，实际 {len(files)} 张。")
+            return
+        meta = {}
+        man = folder / "manifest.csv"
+        if man.exists():
+            with man.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.DictReader(f):
+                    meta[row["file"]] = (int(row.get("xoff", 0)), int(row.get("yoff", 0)))
+        for idx, path in zip(targets, files[:len(targets)]):
+            old = self.archive.get_sprite(idx)
+            xoff, yoff = meta.get(path.name, (old.xoff, old.yoff))
+            self.archive.set_sprite(idx, ImageTools.import_png(path, self.palette, xoff, yoff))
+            self.invalidate_thumb(idx)
+        self.mark_dirty()
+        self.draw_grid(clear_cache=False)
+
+    def batch_resize_selected(self):
+        if not self.archive or not self.selection:
+            return
+        dlg = ResizeDialog(self.root)
+        if not getattr(dlg, "result", None):
+            return
+        result = dlg.result
+        if not result["width"] and not result["height"]:
+            return
+        try:
+            for i in self.selected_indices():
+                spr = self.archive.get_sprite(i)
+                if result["absolute"]:
+                    new_w = int(result["width"]) if result["width"] else spr.width
+                    new_h = int(result["height"]) if result["height"] else spr.height
+                else:
+                    new_w = spr.width + (int(result["width"]) if result["width"] else 0)
+                    new_h = spr.height + (int(result["height"]) if result["height"] else 0)
+                resize_sprite(spr, new_w, new_h, result["anchor"])
+                self.archive.raw_entries[i] = None
+                self.invalidate_thumb(i)
+            self.mark_dirty()
+            self.draw_grid(clear_cache=False)
+        except Exception as e:
+            messagebox.showerror("批量修改失败", str(e))
+
+    def copy_single_to_clipboard(self):
+        if not self.archive or len(self.selection) != 1:
+            return
+        try:
+            ImageTools.copy_sprite_to_clipboard(self.archive.get_sprite(self.selected_index()), self.palette, False)
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
+    def paste_single_from_clipboard(self):
+        if not self.archive or len(self.selection) != 1:
+            return
+        idx = self.selected_index()
+        try:
+            old = self.archive.get_sprite(idx)
+            pasted = ImageTools.sprite_from_clipboard(self.palette, old.xoff, old.yoff)
+            self.archive.set_sprite(idx, pasted)
+            self.invalidate_thumb(idx)
+            self.mark_dirty()
+            self.draw_grid(clear_cache=False)
+        except Exception as e:
+            messagebox.showerror("粘贴失败", str(e))
+
+    def copy_sprite_with_offset(self):
+        if not self.archive or len(self.selection) != 1:
+            return
+        self.sprite_clipboard = clone_sprite(self.archive.get_sprite(self.selected_index()))
+
+    def paste_sprite_with_offset(self):
+        if not self.archive or len(self.selection) != 1 or not self.sprite_clipboard:
+            return
+        idx = self.selected_index()
+        self.archive.set_sprite(idx, clone_sprite(self.sprite_clipboard))
+        self.invalidate_thumb(idx)
+        self.mark_dirty()
+        self.draw_grid(clear_cache=False)
+
+    def insert_blank_before(self):
+        if not self.archive or len(self.selection) != 1:
+            return
+        idx = self.selected_index()
+        self.archive.insert_many(idx, [blank_sprite()])
+        self.selection = {idx}
+        self.last_selected_index = idx
+        self.mark_dirty()
+        self.draw_grid(clear_cache=True)
+
+    def append_blank_sprite(self):
+        if not self.archive or len(self.selection) != 1:
+            return
+        idx = len(self.archive.sprites)
+        self.archive.append_many([blank_sprite()])
+        self.selection = {idx}
+        self.last_selected_index = idx
+        self.mark_dirty()
+        self.draw_grid(clear_cache=True)
 
     def batch_adjust_offset(self):
         if not self.archive or not self.selection:

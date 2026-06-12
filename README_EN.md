@@ -33,8 +33,12 @@ The project was created because the older editor sFishedit (SFE) is useful but i
 - Multi-color conversion window with source/target color slots, zoom preview, test, restore, undo, redo, and final apply.
 - Batch export PNG files with a `manifest.csv` containing `index/file/width/height/xoff/yoff`.
 - Batch import PNG files by replacing the whole archive, appending to the end, or inserting after the current selection.
+- Export selected sprites and import the first N PNG files from a folder into N selected sprites by filename order.
 - Delete multiple selected sprites.
 - Batch-adjust relative X/Y offsets for selected sprites, for example `+2`, `2`, or `-2`.
+- Batch-resize selected sprites by relative delta or absolute dimensions, with a 3x3 anchor for cropping or padding.
+- Copy/paste a single sprite through the system clipboard, and copy/paste a sprite with its X/Y offsets through an internal cache.
+- Insert a blank sprite before the current sprite, or append a blank sprite to the end.
 - Save with confirmation and automatic `.bak_timestamp` backups for both idx and grp files.
 - Prompt before switching archives when there are unsaved changes.
 - Child windows support `Esc` to close.
@@ -50,6 +54,7 @@ Feel free to follow and send private messages for related questions.
 
 - Batch PNG export and import.
 - Metadata-preserving `manifest.csv` workflow.
+- Selected-image import/export and batch width/height adjustment.
 - Lazy decoding and visible-thumbnail caching for large archives.
 - Safer editing workflow with undo/redo, transparent color tools, crop selection, 1x and zoom previews, and offset crosshair preview.
 - Multi-color conversion with preview and delayed application.
@@ -77,7 +82,7 @@ Feel free to follow and send private messages for related questions.
 
 ## Build
 
-Python 3 and PyInstaller are required. Tkinter is usually bundled with Python on Windows.
+Python 3, Pillow, and PyInstaller are required. Tkinter is usually bundled with Python on Windows.
 
 ```powershell
 .\build_exe.ps1
@@ -92,7 +97,7 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 The built executable is written to:
 
 ```text
-dist\金庸群侠传贴图资源编辑器v0.1.exe
+dist\JYIMGEditor.exe
 ```
 
 ## License
