@@ -20,6 +20,8 @@ APP_NAME = "金庸群侠传贴图资源编辑器"
 APP_VERSION = "v0.2"
 AUTHOR = "海底.zip"
 BG = "#307070"
+APP_USER_MODEL_ID = "haitei155.JYIMGEditor"
+FIXED_ANCHOR_MIN_SIDE_MARGIN = 10
 MAIN_WINDOW_EXTRA_WIDTH = 24
 MAIN_WINDOW_SCREEN_MARGIN = 20
 MAIN_WINDOW_MIN_WIDTH = 1000
@@ -32,6 +34,12 @@ def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def resource_path(*parts) -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS).joinpath(*parts)
+    return app_dir().joinpath(*parts)
 
 
 def u16(data: bytes, pos: int) -> int:
@@ -119,6 +127,40 @@ class ToolTip:
             self.tip = None
 
 
+def center_window(win):
+    win.update_idletasks()
+    width = max(1, win.winfo_width())
+    height = max(1, win.winfo_height())
+    screen_w = win.winfo_screenwidth()
+    screen_h = win.winfo_screenheight()
+    x = max(0, (screen_w - width) // 2)
+    y = max(0, (screen_h - height) // 2)
+    win.geometry(f"+{x}+{y}")
+
+
+def set_window_icon(win):
+    ico_path = resource_path("assets", "JYIMGEditor.ico")
+    icon_path = resource_path("assets", "JYIMGEditor.png")
+    try:
+        if ico_path.exists():
+            win.iconbitmap(default=str(ico_path))
+        if icon_path.exists():
+            photo = tk.PhotoImage(file=str(icon_path))
+            win.iconphoto(True, photo)
+            win._jy_icon = photo
+    except tk.TclError:
+        pass
+
+
+def set_app_user_model_id():
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
 @dataclass
 class Sprite:
     width: int
@@ -134,6 +176,25 @@ def clone_sprite(sprite):
 
 def blank_sprite():
     return Sprite(1, 1, 0, 0, [[-1]])
+
+
+def sprite_anchor_margin(sprite):
+    return max(
+        0,
+        int(sprite.xoff),
+        int(sprite.yoff),
+        int(sprite.width) - 1 - int(sprite.xoff),
+        int(sprite.height) - 1 - int(sprite.yoff),
+    )
+
+
+def sprite_anchor_margins(sprite):
+    return (
+        max(FIXED_ANCHOR_MIN_SIDE_MARGIN, int(sprite.xoff)),
+        max(FIXED_ANCHOR_MIN_SIDE_MARGIN, int(sprite.yoff)),
+        max(FIXED_ANCHOR_MIN_SIDE_MARGIN, int(sprite.width) - 1 - int(sprite.xoff)),
+        max(FIXED_ANCHOR_MIN_SIDE_MARGIN, int(sprite.height) - 1 - int(sprite.yoff)),
+    )
 
 
 def anchor_offsets(old_w, old_h, new_w, new_h, anchor):
@@ -339,14 +400,22 @@ class JyPicArchive:
 
 class ImageTools:
     @staticmethod
-    def sprite_to_photo(sprite: Sprite, palette: Palette, zoom=1, show_offset=False, fixed_anchor=False):
+    def sprite_to_photo(sprite: Sprite, palette: Palette, zoom=1, show_offset=False, fixed_anchor=False, anchor_margins=None):
         zoom = max(1, int(zoom))
-        pad = 40 if show_offset and fixed_anchor else 0
-        w, h = max(1, sprite.width * zoom + pad * 2), max(1, sprite.height * zoom + pad * 2)
+        if fixed_anchor:
+            left, top, right, bottom = anchor_margins or sprite_anchor_margins(sprite)
+            w = max(1, (left + right + 1) * zoom)
+            h = max(1, (top + bottom + 1) * zoom)
+            ox = (left - sprite.xoff) * zoom
+            oy = (top - sprite.yoff) * zoom
+            cx = left * zoom
+            cy = top * zoom
+        else:
+            w, h = max(1, sprite.width * zoom), max(1, sprite.height * zoom)
+            ox = oy = 0
+            cx, cy = sprite.xoff * zoom, sprite.yoff * zoom
         photo = tk.PhotoImage(width=w, height=h)
         photo.put(BG, to=(0, 0, w, h))
-        ox = pad
-        oy = pad
         for y in range(sprite.height):
             runs = []
             last = None
@@ -363,7 +432,6 @@ class ImageTools:
             for x1, x2, color in runs:
                 photo.put(color, to=(ox + x1 * zoom, oy + y * zoom, ox + x2 * zoom, oy + (y + 1) * zoom))
         if show_offset:
-            cx, cy = ox + sprite.xoff * zoom, oy + sprite.yoff * zoom
             red = "#ff0000"
             arm = max(8, 8 * zoom)
             thick = max(1, zoom // 3)
@@ -384,7 +452,12 @@ class ImageTools:
 
     @staticmethod
     def sprite_to_pil(sprite: Sprite, palette: Palette, show_offset=False):
-        img = Image.new("RGB", (max(1, sprite.width), max(1, sprite.height)), Palette.parse_hex(BG))
+        width = max(1, sprite.width)
+        height = max(1, sprite.height)
+        if show_offset:
+            width = max(width, sprite.xoff + 1)
+            height = max(height, sprite.yoff + 1)
+        img = Image.new("RGB", (width, height), Palette.parse_hex(BG))
         px = img.load()
         for y, row in enumerate(sprite.pixels):
             for x, idx in enumerate(row):
@@ -393,11 +466,11 @@ class ImageTools:
         if show_offset:
             cx, cy = sprite.xoff, sprite.yoff
             red = (255, 0, 0)
-            for x in range(max(0, cx - 8), min(sprite.width, cx + 9)):
-                if 0 <= cy < sprite.height:
+            for x in range(max(0, cx - 8), min(width, cx + 9)):
+                if 0 <= cy < height:
                     px[x, cy] = red
-            for y in range(max(0, cy - 8), min(sprite.height, cy + 9)):
-                if 0 <= cx < sprite.width:
+            for y in range(max(0, cy - 8), min(height, cy + 9)):
+                if 0 <= cx < width:
                     px[cx, y] = red
         return img
 
@@ -427,8 +500,18 @@ class ImageTools:
         output.close()
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
+        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
         kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
         kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.restype = ctypes.c_bool
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.restype = ctypes.c_void_p
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.OpenClipboard.restype = ctypes.c_bool
+        user32.EmptyClipboard.restype = ctypes.c_bool
+        user32.CloseClipboard.restype = ctypes.c_bool
         user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
         user32.SetClipboardData.restype = ctypes.c_void_p
         gmem_moveable = 0x0002
@@ -437,7 +520,10 @@ class ImageTools:
         if not hglobal:
             raise RuntimeError("无法分配剪贴板内存")
         ptr = kernel32.GlobalLock(hglobal)
-        ctypes.memmove(ptr, data, len(data))
+        if not ptr:
+            kernel32.GlobalFree(hglobal)
+            raise RuntimeError("无法锁定剪贴板内存")
+        ctypes.memmove(ctypes.c_void_p(ptr), data, len(data))
         kernel32.GlobalUnlock(hglobal)
         if not user32.OpenClipboard(None):
             kernel32.GlobalFree(hglobal)
@@ -469,6 +555,7 @@ class ImageTools:
 class SpriteEditWindow(tk.Toplevel):
     def __init__(self, app, index: int):
         super().__init__(app.root)
+        set_window_icon(self)
         self.app = app
         self.index = index
         self.zoom = tk.IntVar(value=4)
@@ -478,16 +565,29 @@ class SpriteEditWindow(tk.Toplevel):
         self.selected_color_hex = tk.StringVar(value="#000000")
         self.undo_stack = []
         self.redo_stack = []
+        self.refreshing_fields = False
         self.drag_start = None
         self.drag_rect = None
         self.dragging = False
         self.title(f"贴图编辑 - {index}")
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.build()
         self.bind("<Left>", lambda e: self.prev_sprite())
         self.bind("<Right>", lambda e: self.next_sprite())
-        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Escape>", lambda e: self.close_window())
+        self.bind("<Control-z>", lambda e: self.undo())
+        self.bind("<Control-Z>", lambda e: self.redo())
+        self.bind("<Control-Shift-Z>", lambda e: self.redo())
+        self.bind("<Control-c>", self.copy_shortcut)
+        self.bind("<Control-C>", self.copy_shortcut)
+        self.bind("<Control-v>", self.paste_shortcut)
+        self.bind("<Control-V>", self.paste_shortcut)
+        self.bind("<Control-e>", self.toggle_show_offset)
+        self.bind("<Control-E>", self.toggle_show_offset)
+        self.bind("<Control-q>", self.toggle_fixed_anchor)
+        self.bind("<Control-Q>", self.toggle_fixed_anchor)
         self.refresh()
+        center_window(self)
 
     @property
     def sprite(self):
@@ -507,18 +607,20 @@ class SpriteEditWindow(tk.Toplevel):
             ent = ttk.Entry(fields, textvariable=var, width=8)
             ent.pack(anchor="w", pady=(0, 4))
             self.vars[attr] = var
+            if attr in ("xoff", "yoff"):
+                var.trace_add("write", lambda *args: self.refresh_images_from_fields())
         preview_box = ttk.Frame(top_left)
         preview_box.pack(side=tk.LEFT, anchor="n", padx=(14, 0))
         self.preview_canvas = tk.Canvas(preview_box, bg=BG, width=250, height=180, highlightthickness=1, highlightbackground="#888")
         self.preview_canvas.pack()
         ttk.Button(left, text="确认宽高", command=self.apply_fields).pack(fill=tk.X, pady=3)
-        ttk.Checkbutton(left, text="显示偏移", variable=self.show_offset, command=self.refresh).pack(anchor="w")
-        ttk.Checkbutton(left, text="以X+Y偏移为固定点", variable=self.fixed_anchor, command=self.refresh).pack(anchor="w")
+        ttk.Checkbutton(left, text="显示偏移", variable=self.show_offset, command=self.refresh_images_from_fields).pack(anchor="w")
+        ttk.Checkbutton(left, text="以X+Y偏移为固定点", variable=self.fixed_anchor, command=self.refresh_images_from_fields).pack(anchor="w")
         ttk.Button(left, text="上一张", command=self.prev_sprite).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="下一张", command=self.next_sprite).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="颜色转换", command=self.color_convert).pack(fill=tk.X, pady=3)
-        ttk.Button(left, text="从剪贴板复制", command=self.paste_from_clipboard).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="复制到剪贴板", command=self.copy_to_clipboard).pack(fill=tk.X, pady=3)
+        ttk.Button(left, text="从剪贴板粘贴", command=self.paste_from_clipboard).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="保存图片", command=self.save_png).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="保存修改", command=self.apply_fields).pack(fill=tk.X, pady=3)
         ttk.Label(left, text="选择颜色").pack(anchor="w", pady=(8, 0))
@@ -586,12 +688,36 @@ class SpriteEditWindow(tk.Toplevel):
             self.set_selected_color(idx)
 
     def image_point(self, event):
-        spr = self.sprite
         zoom = max(1, int(self.zoom.get()))
-        pad = 40 if self.show_offset.get() and self.fixed_anchor.get() else 0
-        x = int((self.canvas.canvasx(event.x) - pad) // zoom)
-        y = int((self.canvas.canvasy(event.y) - pad) // zoom)
+        ox, oy = self.display_origin(zoom)
+        x = int((self.canvas.canvasx(event.x) - ox) // zoom)
+        y = int((self.canvas.canvasy(event.y) - oy) // zoom)
         return x, y
+
+    def display_sprite(self):
+        spr = self.sprite
+        if not self.show_offset.get():
+            return spr
+        try:
+            return Sprite(spr.width, spr.height, int(self.vars["xoff"].get()), int(self.vars["yoff"].get()), spr.pixels)
+        except Exception:
+            return spr
+
+    def display_anchor_margins(self, spr=None):
+        if not self.fixed_anchor.get():
+            return None
+        spr = spr or self.display_sprite()
+        app_margins = self.app.get_anchor_margins()
+        spr_margins = sprite_anchor_margins(spr)
+        return tuple(max(a, b) for a, b in zip(app_margins, spr_margins))
+
+    def display_origin(self, zoom=None):
+        zoom = max(1, int(zoom or self.zoom.get()))
+        spr = self.display_sprite()
+        if self.fixed_anchor.get():
+            left, top, _, _ = self.display_anchor_margins(spr)
+            return (left - spr.xoff) * zoom, (top - spr.yoff) * zoom
+        return 0, 0
 
     def push_undo(self):
         self.undo_stack.append(clone_sprite(self.sprite))
@@ -683,13 +809,13 @@ class SpriteEditWindow(tk.Toplevel):
             return
         spr = self.sprite
         zoom = max(1, int(self.zoom.get()))
-        pad = 40 if self.show_offset.get() and self.fixed_anchor.get() else 0
+        ox, oy = self.display_origin(zoom)
         sx, sy = self.drag_start[0], self.drag_start[1]
         ex, ey = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
-        x1 = int((min(sx, ex) - pad) // zoom)
-        y1 = int((min(sy, ey) - pad) // zoom)
-        x2 = int((max(sx, ex) - pad) // zoom)
-        y2 = int((max(sy, ey) - pad) // zoom)
+        x1 = int((min(sx, ex) - ox) // zoom)
+        y1 = int((min(sy, ey) - oy) // zoom)
+        x2 = int((max(sx, ex) - ox) // zoom)
+        y2 = int((max(sy, ey) - oy) // zoom)
         left = max(0, min(spr.width - 1, x1))
         top = max(0, min(spr.height - 1, y1))
         right = max(0, min(spr.width - 1, x2)) + 1
@@ -753,17 +879,28 @@ class SpriteEditWindow(tk.Toplevel):
 
     def refresh(self):
         spr = self.sprite
-        for attr, var in self.vars.items():
-            var.set(str(getattr(spr, attr)))
+        self.refreshing_fields = True
+        try:
+            for attr, var in self.vars.items():
+                var.set(str(getattr(spr, attr)))
+        finally:
+            self.refreshing_fields = False
         self.title(f"贴图编辑 - {self.index}")
+        self.refresh_images_from_fields()
+        self.set_selected_color(self.selected_color.get())
+
+    def refresh_images_from_fields(self):
+        if getattr(self, "refreshing_fields", False) or not hasattr(self, "canvas"):
+            return
+        spr = self.display_sprite()
+        margins = self.display_anchor_margins(spr)
         self.preview_photo = ImageTools.sprite_to_photo(spr, self.app.palette, 1, self.show_offset.get(), False)
         self.preview_canvas.delete("all")
         self.preview_canvas.create_image(4, 4, image=self.preview_photo, anchor="nw")
-        self.photo = ImageTools.sprite_to_photo(spr, self.app.palette, self.zoom.get(), self.show_offset.get(), self.fixed_anchor.get())
+        self.photo = ImageTools.sprite_to_photo(spr, self.app.palette, self.zoom.get(), self.show_offset.get(), self.fixed_anchor.get(), margins)
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self.photo, anchor="nw")
         self.canvas.config(scrollregion=(0, 0, self.photo.width(), self.photo.height()))
-        self.set_selected_color(self.selected_color.get())
 
     def prev_sprite(self):
         self.apply_fields(redraw_grid=False)
@@ -809,8 +946,30 @@ class SpriteEditWindow(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("粘贴失败", str(e), parent=self)
 
+    def copy_shortcut(self, event=None):
+        self.copy_to_clipboard()
+        return "break"
+
+    def paste_shortcut(self, event=None):
+        self.paste_from_clipboard()
+        return "break"
+
+    def toggle_show_offset(self, event=None):
+        self.show_offset.set(not self.show_offset.get())
+        self.refresh_images_from_fields()
+        return "break"
+
+    def toggle_fixed_anchor(self, event=None):
+        self.fixed_anchor.set(not self.fixed_anchor.get())
+        self.refresh_images_from_fields()
+        return "break"
+
     def color_convert(self):
         ColorConvertWindow(self.app, self.index, self, self.selected_color.get())
+
+    def close_window(self):
+        self.app.draw_grid(clear_cache=False)
+        self.destroy()
 
 
 class ColorConvertWindow(tk.Toplevel):
@@ -818,6 +977,7 @@ class ColorConvertWindow(tk.Toplevel):
 
     def __init__(self, app, index, parent=None, initial_from=None):
         super().__init__(parent or app.root)
+        set_window_icon(self)
         self.app = app
         self.index = index
         self.title("颜色转换")
@@ -834,6 +994,7 @@ class ColorConvertWindow(tk.Toplevel):
         self.from_swatches = []
         self.to_swatches = []
         self.zoom = tk.IntVar(value=4)
+        self.current_color_text = tk.StringVar(value=f"当前选择颜色：{BG}")
         self.base_sprite = clone_sprite(app.archive.get_sprite(index))
         self.preview_sprite = clone_sprite(self.base_sprite)
         self.build()
@@ -841,6 +1002,7 @@ class ColorConvertWindow(tk.Toplevel):
         self.refresh_swatches()
         self.refresh_preview()
         self.update_history_buttons()
+        center_window(self)
 
     def build(self):
         frm = ttk.Frame(self)
@@ -852,10 +1014,12 @@ class ColorConvertWindow(tk.Toplevel):
             fc = tk.Canvas(row, width=54, height=26, bg="#000000", highlightthickness=2, highlightbackground="#ddd")
             fc.pack(side=tk.LEFT, padx=(2, 8))
             fc.bind("<Button-1>", lambda e, idx=i: self.toggle_slot(idx, "from"))
+            fc.bind("<Double-Button-1>", lambda e, idx=i: self.choose_slot_color(idx, "from"))
             ttk.Label(row, text="替换\n颜色").pack(side=tk.LEFT)
             tc = tk.Canvas(row, width=54, height=26, bg="#000000", highlightthickness=2, highlightbackground="#ddd")
             tc.pack(side=tk.LEFT, padx=(2, 0))
             tc.bind("<Button-1>", lambda e, idx=i: self.toggle_slot(idx, "to"))
+            tc.bind("<Double-Button-1>", lambda e, idx=i: self.choose_slot_color(idx, "to"))
             self.from_swatches.append(fc)
             self.to_swatches.append(tc)
 
@@ -878,6 +1042,14 @@ class ColorConvertWindow(tk.Toplevel):
         scope.pack(fill=tk.X, pady=(8, 0))
         ttk.Radiobutton(scope, text="转换所有图片", variable=self.scope, value="all").pack(anchor="w")
         ttk.Radiobutton(scope, text="转换当前图片", variable=self.scope, value="current").pack(anchor="w")
+        palette_head = ttk.Frame(frm)
+        palette_head.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(palette_head, text="调色盘").pack(side=tk.LEFT)
+        ttk.Label(palette_head, textvariable=self.current_color_text).pack(side=tk.LEFT, padx=(18, 0))
+        self.palette_canvas = tk.Canvas(frm, width=256, height=144, bg="white", highlightthickness=0)
+        self.palette_canvas.pack(anchor="w", pady=4)
+        self.palette_canvas.bind("<Button-1>", self.on_palette_click)
+        self.draw_palette()
 
         right = ttk.Frame(self)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 8), pady=8)
@@ -931,9 +1103,19 @@ class ColorConvertWindow(tk.Toplevel):
             self.active_slot = None
         else:
             self.active_slot = slot
+            colors = self.from_colors if side == "from" else self.to_colors
+            self.update_current_color_text(colors[row])
         self.refresh_swatches()
 
+    def color_bg(self, color_idx):
+        return BG if color_idx < 0 else rgb_hex(self.app.palette.colors[color_idx])
+
+    def update_current_color_text(self, color_idx):
+        self.current_color_text.set(f"当前选择颜色：{self.color_bg(color_idx)}")
+
     def set_active_color(self, color_idx):
+        color_idx = int(color_idx)
+        self.update_current_color_text(color_idx)
         if self.active_slot is None:
             return
         row, side = self.active_slot
@@ -950,6 +1132,36 @@ class ColorConvertWindow(tk.Toplevel):
         self.refresh_swatches()
         self.refresh_preview()
 
+    def choose_slot_color(self, row, side):
+        self.active_slot = (row, side)
+        self.refresh_swatches()
+        current = self.from_colors[row] if side == "from" else self.to_colors[row]
+        chosen = colorchooser.askcolor(color=self.color_bg(current), parent=self, title="选择颜色")
+        if not chosen or not chosen[1]:
+            return
+        rgb = tuple(int(v) for v in chosen[0])
+        color_idx = -1 if rgb == self.app.palette.transparent_rgb else self.app.palette.nearest(rgb)
+        self.set_active_color(color_idx)
+
+    def draw_palette(self):
+        self.palette_canvas.delete("all")
+        self.palette_canvas.create_rectangle(0, 0, 64, 16, fill=BG, outline="#333")
+        self.palette_canvas.create_text(70, 8, text="透明色", anchor="w")
+        cell = 16
+        y0 = 16
+        for i, rgb in enumerate(self.app.palette.colors):
+            x = (i % 16) * cell
+            y = y0 + (i // 16) * (cell // 2)
+            self.palette_canvas.create_rectangle(x, y, x + cell, y + cell // 2, fill=rgb_hex(rgb), outline="")
+
+    def on_palette_click(self, event):
+        if event.y < 16:
+            self.set_active_color(-1)
+            return
+        idx = int((event.y - 16) // 8) * 16 + int(event.x // 16)
+        if 0 <= idx < 256:
+            self.set_active_color(idx)
+
     def on_preview_click(self, event):
         spr = self.preview_sprite
         zoom = max(1, int(self.zoom.get()))
@@ -957,14 +1169,15 @@ class ColorConvertWindow(tk.Toplevel):
         y = int(self.preview_canvas.canvasy(event.y) // zoom)
         if 0 <= x < spr.width and 0 <= y < spr.height:
             idx = spr.pixels[y][x]
-            if idx >= 0:
-                self.set_active_color(idx)
+            self.set_active_color(idx)
+        else:
+            self.set_active_color(-1)
 
     def refresh_swatches(self):
         for i in range(self.ROWS):
             for side, canvases, colors in [("from", self.from_swatches, self.from_colors), ("to", self.to_swatches, self.to_colors)]:
                 canvas = canvases[i]
-                canvas.configure(bg=rgb_hex(self.app.palette.colors[colors[i]]))
+                canvas.configure(bg=self.color_bg(colors[i]))
                 canvas.configure(highlightbackground="#ff0000" if self.active_slot == (i, side) else "#ddd")
 
     def mappings(self):
@@ -1064,6 +1277,7 @@ class ResizeDialog(simpledialog.Dialog):
         for i, text in enumerate(labels):
             ttk.Radiobutton(grid, text=text, value=i, variable=self.anchor_var, width=3).grid(row=i // 3, column=i % 3, padx=1, pady=1)
         ttk.Label(master, text="空值保持原值；相对模式支持 +1、1、-1").grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
+        ttk.Label(master, text="宽度/高度修改时会自动保持贴图相对X/Y偏移").grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 0))
         return master
 
     def apply(self):
@@ -1077,7 +1291,9 @@ class ResizeDialog(simpledialog.Dialog):
 
 class App:
     def __init__(self):
+        set_app_user_model_id()
         self.root = tk.Tk()
+        set_window_icon(self.root)
         self.root.title(f"{APP_NAME} {APP_VERSION}")
         self.cell_w = 180
         self.cell_h = 92
@@ -1103,6 +1319,7 @@ class App:
         self.selection = set()
         self.last_selected_index = None
         self.sprite_clipboard = None
+        self.anchor_margin_cache = None
         self.thumb_refs = []
         self.thumb_cache = {}
         self.per_row = tk.IntVar(value=10)
@@ -1112,6 +1329,16 @@ class App:
         self.path_var = tk.StringVar(value=str(self.gamepath))
         self.build_ui()
         self.root.bind("<Control-s>", lambda e: self.save_archive())
+        self.root.bind("<Control-a>", self.select_all)
+        self.root.bind("<Control-A>", self.select_all)
+        self.root.bind("<Control-c>", self.copy_shortcut)
+        self.root.bind("<Control-C>", self.copy_shortcut)
+        self.root.bind("<Control-v>", self.paste_shortcut)
+        self.root.bind("<Control-V>", self.paste_shortcut)
+        self.root.bind("<Control-n>", self.append_blank_shortcut)
+        self.root.bind("<Control-N>", self.append_blank_shortcut)
+        self.root.bind("<Control-i>", self.insert_blank_shortcut)
+        self.root.bind("<Control-I>", self.insert_blank_shortcut)
         self.root.bind("<Return>", lambda e: self.load_archive())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -1188,6 +1415,14 @@ class App:
         self.write_config_gamepath()
         messagebox.showinfo("完成", f"已更新 config.ini：\n{self.gamepath}")
 
+    def open_data_dir(self):
+        try:
+            if not self.gamepath.exists():
+                raise FileNotFoundError(str(self.gamepath))
+            os.startfile(self.gamepath)
+        except Exception as e:
+            messagebox.showerror("打开失败", str(e))
+
     def load_file_entries(self):
         sec = self.config["File"] if self.config.has_section("File") else {}
         n = int(sec.get("FileNumber", "0"))
@@ -1209,7 +1444,8 @@ class App:
         top = ttk.Frame(self.root)
         top.pack(fill=tk.X, padx=6, pady=4)
         ttk.Button(top, text="设置data路径", command=self.set_data_path).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Label(top, textvariable=self.path_var, width=42, anchor="w").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(top, textvariable=self.path_var, width=42, anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(top, text="打开data目录", command=self.open_data_dir).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Label(top, text="每行贴图").pack(side=tk.LEFT)
         per_combo = ttk.Combobox(top, textvariable=self.per_row, values=[5, 8, 10, 12, 16, 20], width=5, state="readonly")
         per_combo.pack(side=tk.LEFT, padx=4)
@@ -1254,11 +1490,12 @@ class App:
             self.menu.add_command(label=label, command=cmd)
         self.menu.add_separator()
         for label, cmd in [
-            ("从剪贴板复制", self.paste_single_from_clipboard),
             ("复制到剪贴板", self.copy_single_to_clipboard),
+            ("复制到剪贴板(带偏移十字)", self.copy_single_to_clipboard_with_offset),
+            ("从剪贴板粘贴", self.paste_single_from_clipboard),
             ("复制贴图(带偏移)", self.copy_sprite_with_offset),
             ("粘贴贴图(带偏移)", self.paste_sprite_with_offset),
-            ("插入空白贴图", self.insert_blank_before),
+            ("插入空白贴图(当前贴图前)", self.insert_blank_before),
             ("添加空白贴图到最后", self.append_blank_sprite),
         ]:
             self.menu.add_command(label=label, command=cmd)
@@ -1288,6 +1525,7 @@ class App:
             self.archive.load()
             self.current_base = Path(self.grp_var.get()).stem
             self.selection.clear()
+            self.anchor_margin_cache = None
             self.canvas.yview_moveto(0)
             self.draw_grid(clear_cache=True)
         except Exception as e:
@@ -1307,12 +1545,32 @@ class App:
     def mark_dirty(self):
         if self.archive:
             self.archive.dirty = True
+            self.anchor_margin_cache = None
 
     def invalidate_thumb(self, index=None):
         if index is None:
             self.thumb_cache.clear()
         else:
             self.thumb_cache.pop(index, None)
+
+    def get_anchor_margins(self):
+        if not self.archive:
+            return (FIXED_ANCHOR_MIN_SIDE_MARGIN,) * 4
+        if self.anchor_margin_cache is not None:
+            return self.anchor_margin_cache
+        margins = [FIXED_ANCHOR_MIN_SIDE_MARGIN] * 4
+        for i, spr in enumerate(self.archive.sprites):
+            if spr is not None:
+                margins = [max(a, b) for a, b in zip(margins, sprite_anchor_margins(spr))]
+                continue
+            raw = self.archive.raw_entries[i] or b""
+            if len(raw) >= 8:
+                w, h, xoff, yoff = u16(raw, 0), u16(raw, 2), s16(raw, 4), s16(raw, 6)
+                margins = [max(a, b) for a, b in zip(margins, sprite_anchor_margins(Sprite(w, h, xoff, yoff, [])))]
+            else:
+                margins = [max(a, b) for a, b in zip(margins, sprite_anchor_margins(blank_sprite()))]
+        self.anchor_margin_cache = tuple(margins)
+        return self.anchor_margin_cache
 
     def save_archive(self, confirm=True):
         if not self.archive:
@@ -1408,6 +1666,30 @@ class App:
         if self.selection != old_selection:
             self.draw_grid(clear_cache=False)
 
+    def select_all(self, event=None):
+        if not self.archive:
+            return "break"
+        self.selection = set(range(len(self.archive.sprites)))
+        self.last_selected_index = len(self.archive.sprites) - 1 if self.archive.sprites else None
+        self.draw_grid(clear_cache=False)
+        return "break"
+
+    def copy_shortcut(self, event=None):
+        self.copy_single_to_clipboard()
+        return "break"
+
+    def paste_shortcut(self, event=None):
+        self.paste_single_from_clipboard()
+        return "break"
+
+    def append_blank_shortcut(self, event=None):
+        self.append_blank_sprite()
+        return "break"
+
+    def insert_blank_shortcut(self, event=None):
+        self.insert_blank_before()
+        return "break"
+
     def on_double(self, event):
         idx = self.index_at(event)
         if idx is not None:
@@ -1429,10 +1711,10 @@ class App:
         has_selection = count > 0
         for label in ["选中图片导出PNG", "选中图片导入PNG", "批量调整X/Y偏移", "批量修改宽度/高度", "删除选中贴图"]:
             self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
-        for label in ["从剪贴板复制", "复制到剪贴板", "复制贴图(带偏移)", "插入空白贴图"]:
+        for label in ["复制到剪贴板", "复制到剪贴板(带偏移十字)", "从剪贴板粘贴", "复制贴图(带偏移)", "插入空白贴图(当前贴图前)"]:
             self.menu.entryconfigure(label, state=tk.NORMAL if single else tk.DISABLED)
         self.menu.entryconfigure("粘贴贴图(带偏移)", state=tk.NORMAL if single and self.sprite_clipboard else tk.DISABLED)
-        self.menu.entryconfigure("添加空白贴图到最后", state=tk.NORMAL if single else tk.DISABLED)
+        self.menu.entryconfigure("添加空白贴图到最后", state=tk.NORMAL if self.archive else tk.DISABLED)
 
     def selected_index(self):
         return min(self.selection) if self.selection else 0
@@ -1528,6 +1810,14 @@ class App:
         except Exception as e:
             messagebox.showerror("复制失败", str(e))
 
+    def copy_single_to_clipboard_with_offset(self):
+        if not self.archive or len(self.selection) != 1:
+            return
+        try:
+            ImageTools.copy_sprite_to_clipboard(self.archive.get_sprite(self.selected_index()), self.palette, True)
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
+
     def paste_single_from_clipboard(self):
         if not self.archive or len(self.selection) != 1:
             return
@@ -1567,7 +1857,7 @@ class App:
         self.draw_grid(clear_cache=True)
 
     def append_blank_sprite(self):
-        if not self.archive or len(self.selection) != 1:
+        if not self.archive:
             return
         idx = len(self.archive.sprites)
         self.archive.append_many([blank_sprite()])
@@ -1659,6 +1949,7 @@ class App:
 
     def about(self):
         win = tk.Toplevel(self.root)
+        set_window_icon(win)
         win.title("关于")
         win.resizable(False, False)
         win.transient(self.root)

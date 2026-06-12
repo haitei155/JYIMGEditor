@@ -20,6 +20,14 @@ The project was created because the older editor sFishedit (SFE) is useful but i
 
 ![Color conversion](docs/images/color-convert.png)
 
+### Batch X/Y Offset Adjustment
+
+![Batch X/Y offset adjustment](docs/images/batch-offset-dialog.png)
+
+### Batch Width/Height Resize
+
+![Batch width/height resize](docs/images/batch-resize-dialog.png)
+
 ## Features
 
 - Configurable archive list through `config.ini`, including normal `File0..FileN` entries and fight sprite sequences such as `FightName=fdx***,fmp***`.
@@ -60,6 +68,16 @@ Feel free to follow and send private messages for related questions.
 - Multi-color conversion with preview and delayed application.
 - Batch relative offset adjustment for selected sprites.
 - A modern Windows-friendly implementation intended to avoid the crashes encountered with the old editor on Windows 11.
+
+## Keyboard Shortcuts
+
+- Main window: `Enter` loads or refreshes the current archive, `Ctrl+S` saves, and `Ctrl+A` selects all sprites in the current archive.
+- Main window: `Ctrl+C` copies the single selected sprite to the system clipboard, and `Ctrl+V` pastes from the clipboard into the single selected sprite.
+- Main window: `Ctrl+N` appends a blank sprite to the end, and `Ctrl+I` inserts a blank sprite before the current selection.
+- Sprite editor: `Left/Right` switches to the previous/next sprite, and `Esc` closes the window.
+- Sprite editor: `Ctrl+C` copies to the clipboard, `Ctrl+V` pastes from the clipboard, `Ctrl+Z` undoes, and `Ctrl+Shift+Z` redoes.
+- Sprite editor: `Ctrl+E` toggles the offset crosshair, and `Ctrl+Q` toggles the fixed X/Y offset anchor preview. Clipboard copy includes the red offset crosshair when the offset crosshair option is enabled.
+- Color conversion: `Esc` closes the window. After selecting a source/target color slot, click the preview or palette to pick a color; double-click a slot to open the system color picker.
 
 ## Usage
 

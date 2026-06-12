@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="32" y1="24" x2="224" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#10303a"/>
+      <stop offset="0.58" stop-color="#307070"/>
+      <stop offset="1" stop-color="#101820"/>
+    </linearGradient>
+    <linearGradient id="slash" x1="54" y1="202" x2="210" y2="48" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#44d6ff"/>
+      <stop offset="0.48" stop-color="#ffcf36"/>
+      <stop offset="1" stop-color="#ff5448"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="50" fill="url(#bg)"/>
+  <path d="M60 188 188 60" stroke="url(#slash)" stroke-width="24" stroke-linecap="round" opacity="0.95"/>
+  <path d="M66 188 188 66" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.42"/>
+  <g filter="url(#shadow)">
+    <rect x="42" y="58" width="172" height="124" rx="18" fill="#101820" opacity="0.78"/>
+    <text x="128" y="145" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="66" font-weight="900" fill="#f5fbff" stroke="#0a1118" stroke-width="5" paint-order="stroke">JYIE</text>
+  </g>
+  <path d="M54 204h148" stroke="#49ddff" stroke-width="10" stroke-linecap="round"/>
+</svg>
