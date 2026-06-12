@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+*.spec
+*.egg-info/
+.eggs/
+
+# Environment / secrets
+.env
+.env.*
+
+# Local/editor files
+.vscode/
+.idea/
+pictest/
+*.log
+*.tmp
+
+# Test/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# JYIMGEditor-generated backups
+*.bak_*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
