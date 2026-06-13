@@ -18,7 +18,7 @@ from PIL import Image, ImageGrab
 
 
 APP_NAME = "金庸群侠传贴图资源编辑器"
-APP_VERSION = "v0.3"
+APP_VERSION = "v0.4"
 AUTHOR = "海底.zip"
 BG = "#307070"
 APP_USER_MODEL_ID = "haitei155.JYIMGEditor"
@@ -68,6 +68,15 @@ def p32(v: int) -> bytes:
 
 def rgb_hex(rgb):
     return "#%02x%02x%02x" % tuple(rgb[:3])
+
+
+def parse_hex_color_text(text):
+    value = (text or "").strip()
+    if value.startswith("#"):
+        value = value[1:]
+    if len(value) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in value):
+        return None
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
 
 class ToolTip:
@@ -606,12 +615,17 @@ class SpriteEditWindow(tk.Toplevel):
         self.fixed_anchor = tk.BooleanVar(value=self.app.sprite_edit_fixed_anchor)
         self.selected_color = tk.IntVar(value=0)
         self.selected_color_hex = tk.StringVar(value="#000000")
+        self.color_text_updating = False
+        self.paint_mode = tk.StringVar(value="brush")
         self.undo_stack = []
         self.redo_stack = []
         self.refreshing_fields = False
         self.drag_start = None
         self.drag_rect = None
         self.dragging = False
+        self.painting = False
+        self.paint_last_point = None
+        self.paint_changed = False
         self.title(f"贴图编辑 - {index}")
         self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.build()
@@ -669,9 +683,20 @@ class SpriteEditWindow(tk.Toplevel):
         ttk.Button(left, text="保存图片", command=self.save_png).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="保存修改", command=self.apply_fields).pack(fill=tk.X, pady=3)
         ttk.Label(left, text="选择颜色").pack(anchor="w", pady=(8, 0))
-        self.color_preview = tk.Canvas(left, width=72, height=24, bg="#000000", highlightthickness=1, highlightbackground="#888")
-        self.color_preview.pack(anchor="w", pady=2)
-        ttk.Label(left, textvariable=self.selected_color_hex).pack(anchor="w")
+        color_row = ttk.Frame(left)
+        color_row.pack(fill=tk.X, pady=2)
+        self.color_preview = tk.Canvas(color_row, width=72, height=24, bg="#000000", highlightthickness=1, highlightbackground="#888")
+        self.color_preview.pack(side=tk.LEFT, anchor="n")
+        self.color_preview.bind("<Double-Button-1>", self.choose_selected_color)
+        mode_box = ttk.Frame(color_row)
+        mode_box.pack(side=tk.LEFT, anchor="n", padx=(10, 0))
+        ttk.Radiobutton(mode_box, text="画笔", variable=self.paint_mode, value="brush").pack(side=tk.LEFT)
+        ttk.Radiobutton(mode_box, text="油漆桶", variable=self.paint_mode, value="bucket").pack(side=tk.LEFT, padx=(6, 0))
+        self.color_entry = ttk.Entry(left, textvariable=self.selected_color_hex, width=10)
+        self.color_entry.pack(anchor="w", pady=(0, 3))
+        self.color_entry.bind("<Return>", self.blur_text_input)
+        self.color_entry.bind("<KP_Enter>", self.blur_text_input)
+        self.selected_color_hex.trace_add("write", self.on_selected_color_hex_changed)
         color_buttons = ttk.Frame(left)
         color_buttons.pack(fill=tk.X, pady=3)
         select_tr_btn = ttk.Button(color_buttons, text="选择透明色", command=lambda: self.set_selected_color(-1))
@@ -698,13 +723,18 @@ class SpriteEditWindow(tk.Toplevel):
         zoom_combo.pack(side=tk.LEFT)
         bind_combobox_home_end(zoom_combo, self.on_zoom_changed)
 
-        self.canvas = tk.Canvas(self, bg="black", width=700, height=560, scrollregion=(0, 0, 100, 100))
+        self.canvas = tk.Canvas(self, bg="black", width=700, height=560, scrollregion=(0, 0, 100, 100), takefocus=True)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=6)
         self.canvas.bind("<ButtonPress-1>", self.on_image_press)
         self.canvas.bind("<B1-Motion>", self.on_image_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_image_release)
-        self.canvas.bind("<Button-3>", self.on_image_right_click)
-        ToolTip(self.canvas, "左键拾取颜色，右键修改颜色，拖拽方块裁剪贴图", delay=2000)
+        self.canvas.bind("<ButtonPress-3>", self.on_image_paint_press)
+        self.canvas.bind("<B3-Motion>", self.on_image_paint_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.on_image_paint_release)
+        self.canvas.bind("<MouseWheel>", self.on_image_mousewheel)
+        self.canvas.bind("<Control-MouseWheel>", self.on_image_ctrl_mousewheel)
+        self.canvas.bind("<Alt-MouseWheel>", self.on_image_alt_mousewheel)
+        ToolTip(self.canvas, "左键拾取颜色，右键按当前模式上色，左键拖拽方块裁剪贴图", delay=2000)
 
     def draw_palette(self):
         cell = 16
@@ -716,18 +746,41 @@ class SpriteEditWindow(tk.Toplevel):
 
     def set_selected_color(self, idx):
         idx = int(idx)
+        self.color_text_updating = True
         if idx < 0:
             self.selected_color.set(-1)
-            self.selected_color_hex.set(f"透明色: {BG}")
+            self.selected_color_hex.set(BG)
             self.color_preview.configure(bg=BG)
+            self.color_text_updating = False
             return
         idx = max(0, min(255, idx))
         self.selected_color.set(idx)
         color = rgb_hex(self.app.palette.colors[idx])
-        self.selected_color_hex.set(f"{idx}: {color}")
+        self.selected_color_hex.set(color)
         self.color_preview.configure(bg=color)
+        self.color_text_updating = False
+
+    def color_index_from_rgb(self, rgb):
+        return -1 if tuple(rgb) == self.app.palette.transparent_rgb else self.app.palette.nearest(rgb)
+
+    def on_selected_color_hex_changed(self, *args):
+        if self.color_text_updating:
+            return
+        rgb = parse_hex_color_text(self.selected_color_hex.get())
+        if rgb is None:
+            return
+        self.set_selected_color(self.color_index_from_rgb(rgb))
+
+    def choose_selected_color(self, event=None):
+        chosen = colorchooser.askcolor(color=self.selected_color_hex.get(), parent=self, title="选择颜色")
+        if not chosen or not chosen[0]:
+            return "break"
+        rgb = tuple(int(v) for v in chosen[0])
+        self.set_selected_color(self.color_index_from_rgb(rgb))
+        return "break"
 
     def on_palette_click(self, event):
+        self.canvas.focus_set()
         idx = int(event.y // 8) * 16 + int(event.x // 16)
         if 0 <= idx < 256:
             self.set_selected_color(idx)
@@ -742,6 +795,36 @@ class SpriteEditWindow(tk.Toplevel):
     def on_zoom_changed(self, event=None):
         self.app.sprite_edit_zoom = max(1, int(self.zoom.get()))
         self.refresh()
+
+    def on_image_mousewheel(self, event):
+        if event.delta > 0:
+            self.prev_sprite()
+        else:
+            self.next_sprite()
+        return "break"
+
+    def on_image_ctrl_mousewheel(self, event):
+        if event.delta > 0:
+            self.prev_sprite()
+        else:
+            self.next_sprite()
+        return "break"
+
+    def on_image_alt_mousewheel(self, event):
+        values = [1, 2, 4, 8, 16]
+        current = int(self.zoom.get())
+        try:
+            pos = values.index(current)
+        except ValueError:
+            pos = min(range(len(values)), key=lambda i: abs(values[i] - current))
+        if event.delta > 0:
+            pos = min(len(values) - 1, pos + 1)
+        else:
+            pos = max(0, pos - 1)
+        if values[pos] != current:
+            self.zoom.set(values[pos])
+            self.on_zoom_changed()
+        return "break"
 
     def on_show_offset_changed(self, event=None):
         self.app.sprite_edit_show_offset = bool(self.show_offset.get())
@@ -813,6 +896,7 @@ class SpriteEditWindow(tk.Toplevel):
         self.app.invalidate_thumb(self.index)
 
     def on_image_press(self, event):
+        self.canvas.focus_set()
         self.drag_start = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y), event.x, event.y)
         self.dragging = False
         if self.drag_rect:
@@ -844,22 +928,92 @@ class SpriteEditWindow(tk.Toplevel):
         self.dragging = False
 
     def on_image_click(self, event):
+        self.canvas.focus_set()
         spr = self.sprite
         x, y = self.image_point(event)
         if 0 <= x < spr.width and 0 <= y < spr.height:
             idx = spr.pixels[y][x]
             self.set_selected_color(idx)
 
-    def on_image_right_click(self, event):
+    def on_image_paint_press(self, event):
+        self.canvas.focus_set()
+        if self.paint_mode.get() == "bucket":
+            self.paint_bucket(self.image_point(event))
+            return "break"
+        self.painting = True
+        self.paint_changed = False
+        self.paint_last_point = self.image_point(event)
+        self.paint_line(self.paint_last_point, self.paint_last_point)
+        return "break"
+
+    def on_image_paint_drag(self, event):
+        if self.paint_mode.get() == "bucket":
+            return "break"
+        if not self.painting:
+            return "break"
+        point = self.image_point(event)
+        if self.paint_last_point is None:
+            self.paint_last_point = point
+        self.paint_line(self.paint_last_point, point)
+        self.paint_last_point = point
+        return "break"
+
+    def on_image_paint_release(self, event):
+        if self.paint_mode.get() == "bucket":
+            self.painting = False
+            self.paint_last_point = None
+            self.paint_changed = False
+            return "break"
+        if self.painting and self.paint_last_point is not None:
+            self.paint_line(self.paint_last_point, self.image_point(event))
+        self.painting = False
+        self.paint_last_point = None
+        self.paint_changed = False
+        return "break"
+
+    def paint_line(self, start, end):
         spr = self.sprite
-        x, y = self.image_point(event)
-        if 0 <= x < spr.width and 0 <= y < spr.height:
-            if spr.pixels[y][x] == int(self.selected_color.get()):
-                return
-            self.push_undo()
-            spr.pixels[y][x] = int(self.selected_color.get())
+        x1, y1 = start
+        x2, y2 = end
+        steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+        color = int(self.selected_color.get())
+        changed = False
+        for i in range(steps + 1):
+            x = int(round(x1 + (x2 - x1) * i / steps))
+            y = int(round(y1 + (y2 - y1) * i / steps))
+            if 0 <= x < spr.width and 0 <= y < spr.height and spr.pixels[y][x] != color:
+                if not self.paint_changed:
+                    self.push_undo()
+                    self.paint_changed = True
+                spr.pixels[y][x] = color
+                changed = True
+        if changed:
             self.mark_sprite_changed()
             self.refresh()
+        return changed
+
+    def paint_bucket(self, point):
+        spr = self.sprite
+        x, y = point
+        if not (0 <= x < spr.width and 0 <= y < spr.height):
+            return False
+        target = spr.pixels[y][x]
+        color = int(self.selected_color.get())
+        if target == color:
+            return False
+        self.push_undo()
+        stack = [(x, y)]
+        while stack:
+            px, py = stack.pop()
+            if not (0 <= px < spr.width and 0 <= py < spr.height):
+                continue
+            if spr.pixels[py][px] != target:
+                continue
+            spr.pixels[py][px] = color
+            stack.extend(((px + 1, py), (px - 1, py), (px, py + 1), (px, py - 1)))
+        self.mark_sprite_changed()
+        self.refresh()
+        return True
 
     def crop_to_drag(self, event):
         if not self.drag_start:
@@ -1004,12 +1158,30 @@ class SpriteEditWindow(tk.Toplevel):
             messagebox.showerror("粘贴失败", str(e), parent=self)
 
     def copy_shortcut(self, event=None):
+        if self.text_input_has_focus():
+            return None
         self.copy_to_clipboard()
         return "break"
 
     def paste_shortcut(self, event=None):
+        if self.text_input_has_focus():
+            return None
         self.paste_from_clipboard()
         return "break"
+
+    def blur_text_input(self, event=None):
+        self.canvas.focus_set()
+        return "break"
+
+    def text_input_has_focus(self):
+        widget = self.focus_get()
+        if not widget:
+            return False
+        try:
+            cls = widget.winfo_class()
+        except tk.TclError:
+            return False
+        return cls in {"Entry", "TEntry", "Text", "Spinbox", "TSpinbox"}
 
     def toggle_show_offset(self, event=None):
         self.show_offset.set(not self.show_offset.get())
@@ -1053,7 +1225,8 @@ class ColorConvertWindow(tk.Toplevel):
         self.from_swatches = []
         self.to_swatches = []
         self.zoom = tk.IntVar(value=self.app.color_convert_zoom)
-        self.current_color_text = tk.StringVar(value=f"当前选择颜色：{BG}")
+        self.current_color_hex = tk.StringVar(value=BG)
+        self.color_text_updating = False
         self.base_sprite = clone_sprite(app.archive.get_sprite(index))
         self.preview_sprite = clone_sprite(self.base_sprite)
         self.build()
@@ -1109,7 +1282,10 @@ class ColorConvertWindow(tk.Toplevel):
         palette_head = ttk.Frame(frm)
         palette_head.pack(fill=tk.X, pady=(8, 0))
         ttk.Label(palette_head, text="调色盘").pack(side=tk.LEFT)
-        ttk.Label(palette_head, textvariable=self.current_color_text).pack(side=tk.LEFT, padx=(18, 0))
+        ttk.Label(palette_head, text="当前颜色").pack(side=tk.LEFT, padx=(18, 4))
+        current_entry = ttk.Entry(palette_head, textvariable=self.current_color_hex, width=10)
+        current_entry.pack(side=tk.LEFT)
+        self.current_color_hex.trace_add("write", self.on_current_color_hex_changed)
         self.palette_canvas = tk.Canvas(frm, width=256, height=144, bg="white", highlightthickness=0)
         self.palette_canvas.pack(anchor="w", pady=4)
         self.palette_canvas.bind("<Button-1>", self.on_palette_click)
@@ -1183,7 +1359,20 @@ class ColorConvertWindow(tk.Toplevel):
         return BG if color_idx < 0 else rgb_hex(self.app.palette.colors[color_idx])
 
     def update_current_color_text(self, color_idx):
-        self.current_color_text.set(f"当前选择颜色：{self.color_bg(color_idx)}")
+        self.color_text_updating = True
+        self.current_color_hex.set(self.color_bg(color_idx))
+        self.color_text_updating = False
+
+    def color_index_from_rgb(self, rgb):
+        return -1 if tuple(rgb) == self.app.palette.transparent_rgb else self.app.palette.nearest(rgb)
+
+    def on_current_color_hex_changed(self, *args):
+        if self.color_text_updating:
+            return
+        rgb = parse_hex_color_text(self.current_color_hex.get())
+        if rgb is None:
+            return
+        self.set_active_color(self.color_index_from_rgb(rgb))
 
     def set_active_color(self, color_idx):
         color_idx = int(color_idx)
@@ -1321,14 +1510,15 @@ class ImportDialog(simpledialog.Dialog):
 class OffsetDialog(simpledialog.Dialog):
     def body(self, master):
         self.title("批量调整偏移")
-        self.dx = tk.StringVar(value="0")
-        self.dy = tk.StringVar(value="0")
+        self.dx = tk.StringVar(value="")
+        self.dy = tk.StringVar(value="")
         ttk.Label(master, text="X 相对调整").grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        ttk.Entry(master, textvariable=self.dx, width=10).grid(row=0, column=1, padx=4, pady=4)
+        first_entry = ttk.Entry(master, textvariable=self.dx, width=10)
+        first_entry.grid(row=0, column=1, padx=4, pady=4)
         ttk.Label(master, text="Y 相对调整").grid(row=1, column=0, sticky="w", padx=4, pady=4)
         ttk.Entry(master, textvariable=self.dy, width=10).grid(row=1, column=1, padx=4, pady=4)
         ttk.Label(master, text="可输入 +1、1 或 -1").grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
-        return master
+        return first_entry
 
     def apply(self):
         self.result = (int(self.dx.get() or "0"), int(self.dy.get() or "0"))
@@ -1342,19 +1532,34 @@ class ResizeDialog(simpledialog.Dialog):
         self.absolute_var = tk.BooleanVar(value=False)
         self.anchor_var = tk.IntVar(value=4)
         ttk.Label(master, text="宽度").grid(row=0, column=0, sticky="w", padx=4, pady=4)
-        ttk.Entry(master, textvariable=self.width_var, width=10).grid(row=0, column=1, sticky="w", padx=4, pady=4)
+        first_entry = ttk.Entry(master, textvariable=self.width_var, width=10)
+        first_entry.grid(row=0, column=1, sticky="w", padx=4, pady=4)
         ttk.Label(master, text="高度").grid(row=1, column=0, sticky="w", padx=4, pady=4)
-        ttk.Entry(master, textvariable=self.height_var, width=10).grid(row=1, column=1, sticky="w", padx=4, pady=4)
+        height_entry = ttk.Entry(master, textvariable=self.height_var, width=10)
+        height_entry.grid(row=1, column=1, sticky="w", padx=4, pady=4)
         ttk.Checkbutton(master, text="直接覆盖宽高（不勾选为相对增减）", variable=self.absolute_var).grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=4)
         ttk.Label(master, text="定位").grid(row=3, column=0, sticky="nw", padx=4, pady=4)
         grid = ttk.Frame(master)
         grid.grid(row=3, column=1, sticky="w", padx=4, pady=4)
         labels = ["↖", "↑", "↗", "←", "●", "→", "↙", "↓", "↘"]
+        anchor_widgets = [first_entry, height_entry, master, self]
         for i, text in enumerate(labels):
-            ttk.Radiobutton(grid, text=text, value=i, variable=self.anchor_var, width=3).grid(row=i // 3, column=i % 3, padx=1, pady=1)
+            btn = ttk.Radiobutton(grid, text=text, value=i, variable=self.anchor_var, width=3)
+            btn.grid(row=i // 3, column=i % 3, padx=1, pady=1)
+            anchor_widgets.append(btn)
         ttk.Label(master, text="空值保持原值；相对模式支持 +1、1、-1").grid(row=4, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
         ttk.Label(master, text="宽度/高度修改时会自动保持贴图相对X/Y偏移").grid(row=5, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 0))
-        return master
+
+        for widget in anchor_widgets:
+            widget.bind("<Up>", lambda e: self.select_anchor(1))
+            widget.bind("<Down>", lambda e: self.select_anchor(7))
+            widget.bind("<Left>", lambda e: self.select_anchor(3))
+            widget.bind("<Right>", lambda e: self.select_anchor(5))
+        return first_entry
+
+    def select_anchor(self, value):
+        self.anchor_var.set(value)
+        return "break"
 
     def apply(self):
         self.result = {
@@ -1420,6 +1625,8 @@ class App:
         self.sprite_edit_show_offset = False
         self.sprite_edit_fixed_anchor = False
         self.file_choice = tk.StringVar()
+        self.file_combo_digit_buffer = ""
+        self.file_combo_digit_after = None
         self.idx_var = tk.StringVar()
         self.grp_var = tk.StringVar()
         self.path_var = tk.StringVar(value=str(self.gamepath))
@@ -1435,6 +1642,21 @@ class App:
         self.root.bind("<Control-N>", self.append_blank_shortcut)
         self.root.bind("<Control-i>", self.insert_blank_shortcut)
         self.root.bind("<Control-I>", self.insert_blank_shortcut)
+        self.root.bind("<Delete>", self.delete_shortcut)
+        self.root.bind("1", self.edit_shortcut)
+        self.root.bind("<KP_1>", self.edit_shortcut)
+        self.root.bind("2", self.batch_offset_shortcut)
+        self.root.bind("<KP_2>", self.batch_offset_shortcut)
+        self.root.bind("3", self.batch_resize_shortcut)
+        self.root.bind("<KP_3>", self.batch_resize_shortcut)
+        self.root.bind("4", self.color_convert_shortcut)
+        self.root.bind("<KP_4>", self.color_convert_shortcut)
+        self.root.bind("<Up>", lambda e: self.move_selection_by_key(-max(1, int(self.per_row.get())), e))
+        self.root.bind("<Down>", lambda e: self.move_selection_by_key(max(1, int(self.per_row.get())), e))
+        self.root.bind("<Left>", lambda e: self.move_selection_by_key(-1, e))
+        self.root.bind("<Right>", lambda e: self.move_selection_by_key(1, e))
+        self.root.bind("<Shift-Home>", lambda e: self.select_to_edge(0, e))
+        self.root.bind("<Shift-End>", lambda e: self.select_to_edge(-1, e))
         self.root.bind("<Return>", lambda e: self.load_archive())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -1685,6 +1907,7 @@ class App:
         self.combo = ttk.Combobox(top, textvariable=self.file_choice, values=[f"{a},{b},{c}" for a, b, c in self.files], width=30)
         self.combo.pack(side=tk.LEFT, padx=6)
         bind_combobox_home_end(self.combo, self.fill_selected_file)
+        self.bind_file_combo_digit_nav()
         ttk.Label(top, text="IDX").pack(side=tk.LEFT)
         ttk.Entry(top, textvariable=self.idx_var, width=13).pack(side=tk.LEFT, padx=3)
         ttk.Label(top, text="GRP").pack(side=tk.LEFT)
@@ -1695,7 +1918,7 @@ class App:
 
         wrap = ttk.Frame(self.root)
         wrap.pack(fill=tk.BOTH, expand=True)
-        self.canvas = tk.Canvas(wrap, bg=BG)
+        self.canvas = tk.Canvas(wrap, bg=BG, takefocus=True)
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.on_yview)
         hsb = ttk.Scrollbar(wrap, orient="horizontal", command=self.on_xview)
         self.canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -1713,10 +1936,11 @@ class App:
         for label, cmd in [
             ("编辑贴图", self.edit_selected),
             ("颜色转换", self.color_convert_selected),
-            ("选中贴图导出PNG", self.export_selected),
-            ("选中贴图导入PNG", self.import_selected),
             ("批量调整X/Y偏移", self.batch_adjust_offset),
             ("批量修改宽度/高度", self.batch_resize_selected),
+            ("选中贴图导出PNG", self.export_selected),
+            ("选中贴图导入PNG(带偏移)", self.import_selected_with_offset),
+            ("选中贴图导入PNG(无偏移)", self.import_selected_without_offset),
             ("删除选中贴图", self.delete_selected),
         ]:
             self.menu.add_command(label=label, command=cmd)
@@ -1746,6 +1970,93 @@ class App:
             self.idx_var.set(a)
             self.grp_var.set(b)
 
+    def bind_file_combo_digit_nav(self):
+        def bind_popdown(event=None):
+            try:
+                listbox = self.combo.tk.call("ttk::combobox::PopdownWindow", str(self.combo)) + ".f.l"
+                if not hasattr(self.combo, "_jy_file_digit_cmd"):
+                    self.combo._jy_file_digit_cmd = self.combo.register(self.on_file_combo_digit)
+                    self.combo._jy_file_commit_cmd = self.combo.register(self.commit_file_combo_selection)
+                cmd = self.combo._jy_file_digit_cmd
+                commit_cmd = self.combo._jy_file_commit_cmd
+                for digit in "0123456789":
+                    self.combo.tk.call("bind", listbox, f"<KeyPress-{digit}>", f"{cmd} {digit}; break")
+                    self.combo.tk.call("bind", listbox, f"<KP_{digit}>", f"{cmd} {digit}; break")
+                self.combo.tk.call("bind", listbox, "<Return>", f"{commit_cmd}; break")
+            except tk.TclError:
+                pass
+
+        for digit in "0123456789":
+            self.combo.bind(f"<KeyPress-{digit}>", lambda event, d=digit: self.on_file_combo_digit(d))
+            self.combo.bind(f"<KP_{digit}>", lambda event, d=digit: self.on_file_combo_digit(d))
+        self.combo.bind("<Return>", lambda event: self.commit_file_combo_selection())
+        self.combo.bind("<FocusIn>", bind_popdown, add="+")
+        self.combo.bind("<Button-1>", lambda event: self.combo.after(50, bind_popdown), add="+")
+
+    def clear_file_combo_digit_buffer(self):
+        self.file_combo_digit_buffer = ""
+        self.file_combo_digit_after = None
+
+    def on_file_combo_digit(self, digit):
+        if not str(digit).isdigit():
+            return "break"
+        if self.file_combo_digit_after is not None:
+            self.root.after_cancel(self.file_combo_digit_after)
+            self.file_combo_digit_after = None
+        if len(self.file_combo_digit_buffer) >= 3:
+            self.file_combo_digit_buffer = ""
+        self.file_combo_digit_buffer += str(digit)
+        self.file_combo_digit_after = self.root.after(700, self.clear_file_combo_digit_buffer)
+        idx = self.find_fight_file_index(int(self.file_combo_digit_buffer))
+        if idx is not None:
+            self.combo.current(idx)
+            self.select_file_combo_popdown_index(idx)
+            self.fill_selected_file()
+            try:
+                self.combo.icursor(tk.END)
+            except tk.TclError:
+                pass
+        return "break"
+
+    def select_file_combo_popdown_index(self, idx):
+        try:
+            listbox = self.combo.tk.call("ttk::combobox::PopdownWindow", str(self.combo)) + ".f.l"
+            self.combo.tk.call(listbox, "selection", "clear", 0, "end")
+            self.combo.tk.call(listbox, "selection", "set", idx)
+            self.combo.tk.call(listbox, "activate", idx)
+            self.combo.tk.call(listbox, "see", idx)
+        except tk.TclError:
+            pass
+
+    def commit_file_combo_selection(self):
+        self.fill_selected_file()
+        self.clear_file_combo_digit_buffer()
+        try:
+            popdown = self.combo.tk.call("ttk::combobox::PopdownWindow", str(self.combo))
+            is_posted = bool(int(self.combo.tk.call("winfo", "ismapped", popdown)))
+        except tk.TclError:
+            is_posted = False
+        if is_posted:
+            try:
+                self.combo.tk.call("ttk::combobox::Unpost", str(self.combo))
+            except tk.TclError:
+                pass
+        else:
+            self.load_archive()
+            try:
+                self.canvas.focus_set()
+            except tk.TclError:
+                pass
+        return "break"
+
+    def find_fight_file_index(self, number):
+        target_idx = f"fdx{int(number):03d}"
+        target_grp = f"fmp{int(number):03d}"
+        for i, (idx_name, grp_name, _label) in enumerate(self.files):
+            if Path(idx_name).stem.lower() == target_idx and Path(grp_name).stem.lower() == target_grp:
+                return i
+        return None
+
     def resolve(self, name):
         p = Path(name)
         return p if p.is_absolute() else self.gamepath / p
@@ -1762,8 +2073,10 @@ class App:
             self.archive.load()
             self.current_base = Path(self.grp_var.get()).stem
             self.selection.clear()
+            self.last_selected_index = None
             self.anchor_margin_cache = None
             self.canvas.yview_moveto(0)
+            self.canvas.focus_set()
             self.draw_grid(clear_cache=True)
         except Exception as e:
             messagebox.showerror("读取失败", str(e))
@@ -1885,6 +2198,7 @@ class App:
         return None
 
     def on_click(self, event):
+        self.canvas.focus_set()
         idx = self.index_at(event)
         if idx is None:
             return
@@ -1928,13 +2242,134 @@ class App:
         self.insert_blank_before()
         return "break"
 
+    def delete_shortcut(self, event=None):
+        if self.main_shortcut_blocked():
+            return None
+        self.delete_selected()
+        return "break"
+
+    def edit_shortcut(self, event=None):
+        if self.main_shortcut_blocked():
+            return None
+        self.edit_selected()
+        return "break"
+
+    def batch_offset_shortcut(self, event=None):
+        if self.main_shortcut_blocked():
+            return None
+        self.batch_adjust_offset()
+        return "break"
+
+    def batch_resize_shortcut(self, event=None):
+        if self.main_shortcut_blocked():
+            return None
+        self.batch_resize_selected()
+        return "break"
+
+    def color_convert_shortcut(self, event=None):
+        if self.main_shortcut_blocked():
+            return None
+        self.color_convert_selected()
+        return "break"
+
+    def main_shortcut_blocked(self):
+        widget = self.root.focus_get()
+        if not widget:
+            return False
+        try:
+            cls = widget.winfo_class()
+        except tk.TclError:
+            return False
+        return cls in {"Entry", "TEntry", "TCombobox", "Text", "Spinbox", "TSpinbox"}
+
+    def selection_reference_index(self):
+        if not self.archive or not self.archive.sprites:
+            return None
+        total = len(self.archive.sprites)
+        if self.last_selected_index is not None and 0 <= self.last_selected_index < total:
+            return self.last_selected_index
+        if self.selection:
+            return min(max(self.selection), total - 1)
+        return None
+
+    def ensure_index_visible(self, idx):
+        if not self.archive:
+            return
+        per = max(1, int(self.per_row.get()))
+        cell_w, cell_h = self.grid_cell_size()
+        total = len(self.archive.sprites)
+        rows = (total + per - 1) // per
+        total_w = max(1, per * cell_w)
+        total_h = max(1, rows * cell_h)
+        self.canvas.config(scrollregion=(0, 0, total_w, total_h))
+        col, row = idx % per, idx // per
+        x1, y1 = col * cell_w, row * cell_h
+        x2, y2 = x1 + cell_w, y1 + cell_h
+        view_left, view_top = self.canvas.canvasx(0), self.canvas.canvasy(0)
+        view_right = view_left + max(1, self.canvas.winfo_width())
+        view_bottom = view_top + max(1, self.canvas.winfo_height())
+        if x1 < view_left:
+            self.canvas.xview_moveto(x1 / total_w)
+        elif x2 > view_right:
+            self.canvas.xview_moveto(max(0, (x2 - self.canvas.winfo_width()) / total_w))
+        if y1 < view_top:
+            self.canvas.yview_moveto(y1 / total_h)
+        elif y2 > view_bottom:
+            self.canvas.yview_moveto(max(0, (y2 - self.canvas.winfo_height()) / total_h))
+
+    def move_selection_by_key(self, delta, event=None):
+        if self.main_shortcut_blocked() or not self.archive or not self.archive.sprites:
+            return None
+        total = len(self.archive.sprites)
+        ref = self.selection_reference_index()
+        if ref is None:
+            target = 0
+        else:
+            target = max(0, min(total - 1, ref + int(delta)))
+        shift = bool(event and event.state & 0x0001)
+        ctrl = bool(event and event.state & 0x0004)
+        old_selection = set(self.selection)
+        if ref is None:
+            self.selection = {target}
+        elif shift:
+            a, b = sorted((ref, target))
+            self.selection.update(range(a, b + 1))
+        elif ctrl:
+            self.selection.add(target)
+        else:
+            self.selection = {target}
+        self.last_selected_index = target
+        self.ensure_index_visible(target)
+        if self.selection != old_selection:
+            self.draw_grid(clear_cache=False)
+        return "break"
+
+    def select_to_edge(self, edge, event=None):
+        if self.main_shortcut_blocked() or not self.archive or not self.archive.sprites:
+            return None
+        total = len(self.archive.sprites)
+        target = 0 if int(edge) == 0 else total - 1
+        ref = self.selection_reference_index()
+        if ref is None:
+            ref = target
+        a, b = sorted((ref, target))
+        old_selection = set(self.selection)
+        self.selection = set(range(a, b + 1))
+        self.last_selected_index = target
+        self.ensure_index_visible(target)
+        if self.selection != old_selection:
+            self.draw_grid(clear_cache=False)
+        return "break"
+
     def on_double(self, event):
         idx = self.index_at(event)
         if idx is not None:
             self.selection = {idx}
+            self.last_selected_index = idx
             self.edit_selected()
 
     def popup(self, event):
+        self.canvas.focus_set()
         idx = self.index_at(event)
         if idx is not None and idx not in self.selection:
             self.selection = {idx}
@@ -1946,8 +2381,10 @@ class App:
     def update_menu_state(self):
         count = len(self.selection)
         single = count == 1
-        has_selection = count > 0
-        for label in ["选中贴图导出PNG", "选中贴图导入PNG", "批量调整X/Y偏移", "批量修改宽度/高度", "删除选中贴图"]:
+        has_selection = bool(self.archive and count > 0)
+        for label in ["编辑贴图", "颜色转换"]:
+            self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
+        for label in ["选中贴图导出PNG", "选中贴图导入PNG(带偏移)", "选中贴图导入PNG(无偏移)", "批量调整X/Y偏移", "批量修改宽度/高度", "删除选中贴图"]:
             self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
         for label in ["水平翻转", "复制并插入到最后", "复制并倒序插入到最后"]:
             self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
@@ -2033,7 +2470,13 @@ class App:
                 writer.writerow([i, name, spr.width, spr.height, spr.xoff, spr.yoff])
         messagebox.showinfo("完成", f"已导出 {len(self.selection)} 张贴图到：\n{outdir}")
 
-    def import_selected(self):
+    def import_selected_with_offset(self):
+        self.import_selected(use_manifest_offset=True)
+
+    def import_selected_without_offset(self):
+        self.import_selected(use_manifest_offset=False)
+
+    def import_selected(self, use_manifest_offset=True):
         if not self.archive or not self.selection:
             return
         folder = filedialog.askdirectory(title="选择PNG文件夹")
@@ -2047,13 +2490,16 @@ class App:
             return
         meta = {}
         man = folder / "manifest.csv"
-        if man.exists():
+        if use_manifest_offset and man.exists():
             with man.open("r", encoding="utf-8-sig", newline="") as f:
                 for row in csv.DictReader(f):
                     meta[row["file"]] = (int(row.get("xoff", 0)), int(row.get("yoff", 0)))
         for idx, path in zip(targets, files[:len(targets)]):
             old = self.archive.get_sprite(idx)
-            xoff, yoff = meta.get(path.name, (old.xoff, old.yoff))
+            if use_manifest_offset:
+                xoff, yoff = meta.get(path.name, (old.xoff, old.yoff))
+            else:
+                xoff, yoff = old.xoff, old.yoff
             self.archive.set_sprite(idx, ImageTools.import_png(path, self.palette, xoff, yoff))
             self.invalidate_thumb(idx)
         self.mark_dirty()
@@ -2164,7 +2610,7 @@ class App:
         for idx in self.selected_indices():
             spr = self.archive.get_sprite(idx)
             spr.pixels = [list(reversed(row)) for row in spr.pixels]
-            spr.xoff = spr.width - 1 - spr.xoff
+            spr.xoff = spr.width - spr.xoff
             self.archive.raw_entries[idx] = None
             self.invalidate_thumb(idx)
         self.mark_dirty()
@@ -2288,10 +2734,14 @@ class App:
     def delete_selected(self):
         if not self.archive or not self.selection:
             return
-        if not messagebox.askyesno("确认删除", f"删除 {len(self.selection)} 张贴图？"):
+        targets = self.selected_indices()
+        if not targets:
             return
-        self.archive.delete_indexes(self.selection)
+        if not messagebox.askyesno("确认删除", f"删除 {len(targets)} 张贴图？"):
+            return
+        self.archive.delete_indexes(targets)
         self.selection.clear()
+        self.last_selected_index = None
         self.mark_dirty()
         self.draw_grid(clear_cache=True)
 
