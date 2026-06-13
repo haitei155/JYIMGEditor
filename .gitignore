@@ -24,7 +24,6 @@ dist/
 # Local/editor files
 .vscode/
 .idea/
-pictest/
 *.log
 *.tmp
 

@@ -1,3 +1,4 @@
+import base64
 import configparser
 import csv
 import ctypes
@@ -17,7 +18,7 @@ from PIL import Image, ImageGrab
 
 
 APP_NAME = "金庸群侠传贴图资源编辑器"
-APP_VERSION = "v0.2"
+APP_VERSION = "v0.3"
 AUTHOR = "海底.zip"
 BG = "#307070"
 APP_USER_MODEL_ID = "haitei155.JYIMGEditor"
@@ -28,6 +29,7 @@ MAIN_WINDOW_MIN_WIDTH = 1000
 UI_FONT_FAMILY = ""
 UI_FONT_SIZE = 10
 BILIBILI_URL = "https://space.bilibili.com/16385"
+SPRITE_CLIPBOARD_PREFIX = "JYIMGEditorSpriteV1:"
 
 
 def app_dir() -> Path:
@@ -136,6 +138,49 @@ def center_window(win):
     x = max(0, (screen_w - width) // 2)
     y = max(0, (screen_h - height) // 2)
     win.geometry(f"+{x}+{y}")
+
+
+def focus_window(win, widget=None):
+    target = widget or win
+
+    def apply_focus():
+        try:
+            win.lift()
+            win.focus_force()
+            target.focus_set()
+        except tk.TclError:
+            pass
+
+    win.after(0, apply_focus)
+
+
+def bind_combobox_home_end(combo, on_change=None):
+    def apply_index(index):
+        values = list(combo.cget("values"))
+        if not values:
+            return "break"
+        combo.current(max(0, min(len(values) - 1, index)))
+        if on_change:
+            on_change()
+        return "break"
+
+    def bind_popdown(event=None):
+        try:
+            listbox = combo.tk.call("ttk::combobox::PopdownWindow", str(combo)) + ".f.l"
+            home_cmd = combo.register(lambda: apply_index(0))
+            end_cmd = combo.register(lambda: apply_index(len(list(combo.cget("values"))) - 1))
+            combo._jy_combo_nav_cmds = getattr(combo, "_jy_combo_nav_cmds", []) + [home_cmd, end_cmd]
+            combo.tk.call("bind", listbox, "<Home>", f"{home_cmd}; break")
+            combo.tk.call("bind", listbox, "<End>", f"{end_cmd}; break")
+        except tk.TclError:
+            pass
+
+    if on_change:
+        combo.bind("<<ComboboxSelected>>", lambda event: on_change())
+    combo.bind("<Home>", lambda event: apply_index(0))
+    combo.bind("<End>", lambda event: apply_index(len(list(combo.cget("values"))) - 1))
+    combo.bind("<FocusIn>", bind_popdown, add="+")
+    combo.bind("<Button-1>", lambda event: combo.after(50, bind_popdown), add="+")
 
 
 def set_window_icon(win):
@@ -252,7 +297,6 @@ class Palette:
                     for i in range(256)
                 ]
         self.transparent_rgb = self.parse_hex(transparent)
-        self.transparent_index = self.nearest(self.transparent_rgb)
 
     @staticmethod
     def parse_hex(value):
@@ -357,8 +401,7 @@ class JyPicArchive:
                 x = cursor + skip
                 for i in range(cnt):
                     if pos + i < row_end and 0 <= x + i < w:
-                        color = data[pos + i]
-                        pixels[y][x + i] = -1 if color == self.palette.transparent_index else color
+                        pixels[y][x + i] = data[pos + i]
                 pos += cnt
                 cursor = x + cnt
             pos = row_end
@@ -558,9 +601,9 @@ class SpriteEditWindow(tk.Toplevel):
         set_window_icon(self)
         self.app = app
         self.index = index
-        self.zoom = tk.IntVar(value=4)
-        self.show_offset = tk.BooleanVar(value=False)
-        self.fixed_anchor = tk.BooleanVar(value=False)
+        self.zoom = tk.IntVar(value=self.app.sprite_edit_zoom)
+        self.show_offset = tk.BooleanVar(value=self.app.sprite_edit_show_offset)
+        self.fixed_anchor = tk.BooleanVar(value=self.app.sprite_edit_fixed_anchor)
         self.selected_color = tk.IntVar(value=0)
         self.selected_color_hex = tk.StringVar(value="#000000")
         self.undo_stack = []
@@ -588,6 +631,8 @@ class SpriteEditWindow(tk.Toplevel):
         self.bind("<Control-Q>", self.toggle_fixed_anchor)
         self.refresh()
         center_window(self)
+        self.transient(self.app.root)
+        focus_window(self, self.canvas)
 
     @property
     def sprite(self):
@@ -614,8 +659,8 @@ class SpriteEditWindow(tk.Toplevel):
         self.preview_canvas = tk.Canvas(preview_box, bg=BG, width=250, height=180, highlightthickness=1, highlightbackground="#888")
         self.preview_canvas.pack()
         ttk.Button(left, text="确认宽高", command=self.apply_fields).pack(fill=tk.X, pady=3)
-        ttk.Checkbutton(left, text="显示偏移", variable=self.show_offset, command=self.refresh_images_from_fields).pack(anchor="w")
-        ttk.Checkbutton(left, text="以X+Y偏移为固定点", variable=self.fixed_anchor, command=self.refresh_images_from_fields).pack(anchor="w")
+        ttk.Checkbutton(left, text="显示偏移", variable=self.show_offset, command=self.on_show_offset_changed).pack(anchor="w")
+        ttk.Checkbutton(left, text="以X+Y偏移为固定点", variable=self.fixed_anchor, command=self.on_fixed_anchor_changed).pack(anchor="w")
         ttk.Button(left, text="上一张", command=self.prev_sprite).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="下一张", command=self.next_sprite).pack(fill=tk.X, pady=3)
         ttk.Button(left, text="颜色转换", command=self.color_convert).pack(fill=tk.X, pady=3)
@@ -651,7 +696,7 @@ class SpriteEditWindow(tk.Toplevel):
         ttk.Label(top, text="放大倍数").pack(side=tk.LEFT)
         zoom_combo = ttk.Combobox(top, textvariable=self.zoom, values=[1, 2, 4, 8, 16], width=5, state="readonly")
         zoom_combo.pack(side=tk.LEFT)
-        zoom_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        bind_combobox_home_end(zoom_combo, self.on_zoom_changed)
 
         self.canvas = tk.Canvas(self, bg="black", width=700, height=560, scrollregion=(0, 0, 100, 100))
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -693,6 +738,18 @@ class SpriteEditWindow(tk.Toplevel):
         x = int((self.canvas.canvasx(event.x) - ox) // zoom)
         y = int((self.canvas.canvasy(event.y) - oy) // zoom)
         return x, y
+
+    def on_zoom_changed(self, event=None):
+        self.app.sprite_edit_zoom = max(1, int(self.zoom.get()))
+        self.refresh()
+
+    def on_show_offset_changed(self, event=None):
+        self.app.sprite_edit_show_offset = bool(self.show_offset.get())
+        self.refresh_images_from_fields()
+
+    def on_fixed_anchor_changed(self, event=None):
+        self.app.sprite_edit_fixed_anchor = bool(self.fixed_anchor.get())
+        self.refresh_images_from_fields()
 
     def display_sprite(self):
         spr = self.sprite
@@ -956,18 +1013,20 @@ class SpriteEditWindow(tk.Toplevel):
 
     def toggle_show_offset(self, event=None):
         self.show_offset.set(not self.show_offset.get())
-        self.refresh_images_from_fields()
+        self.on_show_offset_changed()
         return "break"
 
     def toggle_fixed_anchor(self, event=None):
         self.fixed_anchor.set(not self.fixed_anchor.get())
-        self.refresh_images_from_fields()
+        self.on_fixed_anchor_changed()
         return "break"
 
     def color_convert(self):
         ColorConvertWindow(self.app, self.index, self, self.selected_color.get())
 
     def close_window(self):
+        self.app.sprite_edit_show_offset = bool(self.show_offset.get())
+        self.app.sprite_edit_fixed_anchor = bool(self.fixed_anchor.get())
         self.app.draw_grid(clear_cache=False)
         self.destroy()
 
@@ -993,16 +1052,21 @@ class ColorConvertWindow(tk.Toplevel):
         self.redo_stack = []
         self.from_swatches = []
         self.to_swatches = []
-        self.zoom = tk.IntVar(value=4)
+        self.zoom = tk.IntVar(value=self.app.color_convert_zoom)
         self.current_color_text = tk.StringVar(value=f"当前选择颜色：{BG}")
         self.base_sprite = clone_sprite(app.archive.get_sprite(index))
         self.preview_sprite = clone_sprite(self.base_sprite)
         self.build()
         self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Control-z>", self.undo_shortcut)
+        self.bind("<Control-Z>", self.redo_shortcut)
+        self.bind("<Control-Shift-Z>", self.redo_shortcut)
         self.refresh_swatches()
         self.refresh_preview()
         self.update_history_buttons()
         center_window(self)
+        self.transient(parent or app.root)
+        focus_window(self, self.preview_canvas)
 
     def build(self):
         frm = ttk.Frame(self)
@@ -1058,7 +1122,7 @@ class ColorConvertWindow(tk.Toplevel):
         ttk.Label(zoom_row, text="放大倍数").pack(side=tk.LEFT)
         zoom_combo = ttk.Combobox(zoom_row, textvariable=self.zoom, values=[1, 2, 4, 8, 16], width=5, state="readonly")
         zoom_combo.pack(side=tk.LEFT, padx=4)
-        zoom_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_preview())
+        bind_combobox_home_end(zoom_combo, self.on_zoom_changed)
         self.preview_canvas = tk.Canvas(right, width=520, height=620, bg=BG, scrollregion=(0, 0, 100, 100))
         self.preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.preview_canvas.bind("<Button-1>", self.on_preview_click)
@@ -1096,6 +1160,14 @@ class ColorConvertWindow(tk.Toplevel):
             return
         self.undo_stack.append(self.snapshot())
         self.restore_snapshot(self.redo_stack.pop())
+
+    def undo_shortcut(self, event=None):
+        self.undo()
+        return "break"
+
+    def redo_shortcut(self, event=None):
+        self.redo()
+        return "break"
 
     def toggle_slot(self, row, side):
         slot = (row, side)
@@ -1172,6 +1244,10 @@ class ColorConvertWindow(tk.Toplevel):
             self.set_active_color(idx)
         else:
             self.set_active_color(-1)
+
+    def on_zoom_changed(self, event=None):
+        self.app.color_convert_zoom = max(1, int(self.zoom.get()))
+        self.refresh_preview()
 
     def refresh_swatches(self):
         for i in range(self.ROWS):
@@ -1295,12 +1371,29 @@ class App:
         self.root = tk.Tk()
         set_window_icon(self.root)
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.cell_w = 180
-        self.cell_h = 92
+        self.builtin_grid_cell_w = 180
+        self.builtin_grid_cell_h = 90
+        self.cfg_path = app_dir() / "config.ini"
+        self.config = configparser.ConfigParser(interpolation=None)
+        self.config.optionxform = str
+        self.config.read(self.cfg_path, encoding="utf-8")
+        self.default_grid_cell_w = self.config_int("View", "UnitWidthBase", self.builtin_grid_cell_w, minimum=1)
+        self.default_grid_cell_h = self.config_int("View", "UnitHeightBase", self.builtin_grid_cell_h, minimum=1)
+        self.cell_w = self.default_grid_cell_w
+        self.cell_h = self.default_grid_cell_h
+        self.per_row_values = self.config_int_list("View", "PerRowValues", list(range(4, 36)), minimum=1)
+        self.unit_width_deltas = self.config_int_list("View", "UnitWidthDeltas", [-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30])
+        self.unit_height_deltas = self.config_int_list("View", "UnitHeightDeltas", [-10,-5,0,5,10,15,20,25,30,35,40,45,50,55,60])
+        self.initial_per_row = self.config_int("View", "PerRow", 10, minimum=1)
+        self.initial_grid_cell_w = self.config_grid_cell_value("UnitWidth", "UnitWidthDelta", self.default_grid_cell_w)
+        self.initial_grid_cell_h = self.config_grid_cell_value("UnitHeight", "UnitHeightDelta", self.default_grid_cell_h)
+        self.per_row_values = self.with_value(self.per_row_values, self.initial_per_row)
+        self.unit_width_values = self.grid_cell_values(self.default_grid_cell_w, self.unit_width_deltas, self.initial_grid_cell_w)
+        self.unit_height_values = self.grid_cell_values(self.default_grid_cell_h, self.unit_height_deltas, self.initial_grid_cell_h)
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         width = min(
-            max(MAIN_WINDOW_MIN_WIDTH, self.cell_w * 10 + MAIN_WINDOW_EXTRA_WIDTH),
+            max(MAIN_WINDOW_MIN_WIDTH, self.initial_grid_cell_w * self.initial_per_row + MAIN_WINDOW_EXTRA_WIDTH),
             max(MAIN_WINDOW_MIN_WIDTH, screen_w - MAIN_WINDOW_SCREEN_MARGIN),
         )
         height = min(920, max(780, screen_h - 80))
@@ -1308,9 +1401,6 @@ class App:
         y = max(0, (screen_h - height) // 2)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
         self.configure_fonts()
-        self.cfg_path = app_dir() / "config.ini"
-        self.config = configparser.ConfigParser()
-        self.config.read(self.cfg_path, encoding="utf-8")
         self.gamepath = self.resolve_initial_gamepath()
         self.palette = Palette(self.gamepath / self.config.get("Run", "Palette", fallback="mmap.col"), self.config.get("Run", "TransparentColor", fallback=BG))
         self.files = self.load_file_entries()
@@ -1322,7 +1412,13 @@ class App:
         self.anchor_margin_cache = None
         self.thumb_refs = []
         self.thumb_cache = {}
-        self.per_row = tk.IntVar(value=10)
+        self.per_row = tk.IntVar(value=self.initial_per_row)
+        self.grid_cell_w = tk.IntVar(value=self.initial_grid_cell_w)
+        self.grid_cell_h = tk.IntVar(value=self.initial_grid_cell_h)
+        self.sprite_edit_zoom = 4
+        self.color_convert_zoom = 4
+        self.sprite_edit_show_offset = False
+        self.sprite_edit_fixed_anchor = False
         self.file_choice = tk.StringVar()
         self.idx_var = tk.StringVar()
         self.grp_var = tk.StringVar()
@@ -1366,6 +1462,99 @@ class App:
         style.configure("Treeview", font=default_font)
         style.configure("Treeview.Heading", font=tkfont.nametofont("TkHeadingFont"))
 
+    def config_int(self, section, option, default, minimum=None):
+        try:
+            value = self.config.get(section, option, fallback=str(default)).strip()
+            result = int(value)
+        except Exception:
+            result = int(default)
+        if minimum is not None:
+            result = max(int(minimum), result)
+        return result
+
+    def config_int_list(self, section, option, default, minimum=None):
+        raw = self.config.get(section, option, fallback="").strip()
+        values = []
+        if raw:
+            for part in raw.replace("，", ",").split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    value = int(part)
+                except ValueError:
+                    continue
+                if minimum is not None:
+                    value = max(int(minimum), value)
+                if value not in values:
+                    values.append(value)
+        return values or list(default)
+
+    def with_value(self, values, value):
+        value = int(value)
+        if value not in values:
+            values = list(values) + [value]
+        return sorted(values)
+
+    def config_grid_cell_value(self, legacy_option, delta_option, base):
+        if self.config.has_option("View", delta_option):
+            return max(1, int(base) + self.config_int("View", delta_option, 0))
+        raw = self.config.get("View", legacy_option, fallback=f"{base}+0").strip().replace(" ", "")
+        try:
+            for pos in range(1, len(raw)):
+                if raw[pos] in "+-":
+                    return max(1, int(raw[:pos]) + int(raw[pos:]))
+            return max(1, int(raw))
+        except Exception:
+            return int(base)
+
+    def grid_cell_config_text(self, value, base):
+        delta = int(value) - int(base)
+        return f"{base}{delta:+d}"
+
+    def config_int_list_text(self, values):
+        return ",".join(str(int(v)) for v in values)
+
+    def write_config(self):
+        sections_written = set()
+        lines = []
+
+        def add_plain_section(section):
+            if not self.config.has_section(section):
+                return
+            sections_written.add(section)
+            lines.append(f"[{section}]")
+            for key, value in self.config.items(section):
+                lines.append(f"{key}={value}")
+            lines.append("")
+
+        add_plain_section("Run")
+        if self.config.has_section("View"):
+            sections_written.add("View")
+            lines.extend([
+                "[View]",
+                "; 每行贴图启动默认值，也会在界面修改后保存为当前选择值",
+                f"PerRow={self.config.get('View', 'PerRow', fallback='10')}",
+                "; 每行贴图下拉菜单可选范围",
+                f"PerRowValues={self.config.get('View', 'PerRowValues', fallback=self.config_int_list_text(list(range(4, 36))))}",
+                "; 单元宽度/高度的基准值",
+                f"UnitWidthBase={self.config.get('View', 'UnitWidthBase', fallback=str(self.builtin_grid_cell_w))}",
+                f"UnitHeightBase={self.config.get('View', 'UnitHeightBase', fallback=str(self.builtin_grid_cell_h))}",
+                "; 单元宽度/高度当前相对基准值的偏移，界面修改后保存这里",
+                f"UnitWidthDelta={self.config.get('View', 'UnitWidthDelta', fallback='0')}",
+                f"UnitHeightDelta={self.config.get('View', 'UnitHeightDelta', fallback='0')}",
+                "; 单元宽度/高度下拉菜单可选的相对偏移范围",
+                f"UnitWidthDeltas={self.config.get('View', 'UnitWidthDeltas', fallback=self.config_int_list_text([-30,-25,-20,-15,-10,-5,0,5,10,15,20,25,30]))}",
+                f"UnitHeightDeltas={self.config.get('View', 'UnitHeightDeltas', fallback=self.config_int_list_text([-10,-5,0,5,10,15,20,25,30,35,40,45,50,55,60]))}",
+                "",
+            ])
+        add_plain_section("File")
+        for section in self.config.sections():
+            if section not in sections_written:
+                add_plain_section(section)
+        with self.cfg_path.open("w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines).rstrip() + "\n")
+
     def resolve_initial_gamepath(self):
         raw = self.config.get("Run", "Gamepath", fallback="../data")
         candidates = []
@@ -1394,8 +1583,22 @@ class App:
             self.config.set("Run", "Palette", "mmap.col")
         if not self.config.has_option("Run", "TransparentColor"):
             self.config.set("Run", "TransparentColor", BG)
-        with self.cfg_path.open("w", encoding="utf-8") as f:
-            self.config.write(f)
+        self.write_config()
+
+    def write_view_config(self):
+        if not self.config.has_section("View"):
+            self.config.add_section("View")
+        self.config.set("View", "PerRow", str(max(1, int(self.per_row.get()))))
+        self.config.set("View", "PerRowValues", self.config_int_list_text(self.per_row_values))
+        self.config.set("View", "UnitWidthBase", str(int(self.default_grid_cell_w)))
+        self.config.set("View", "UnitHeightBase", str(int(self.default_grid_cell_h)))
+        self.config.set("View", "UnitWidthDelta", str(int(self.grid_cell_w.get()) - int(self.default_grid_cell_w)))
+        self.config.set("View", "UnitHeightDelta", str(int(self.grid_cell_h.get()) - int(self.default_grid_cell_h)))
+        self.config.set("View", "UnitWidthDeltas", self.config_int_list_text(self.unit_width_deltas))
+        self.config.set("View", "UnitHeightDeltas", self.config_int_list_text(self.unit_height_deltas))
+        self.config.remove_option("View", "UnitWidth")
+        self.config.remove_option("View", "UnitHeight")
+        self.write_config()
 
     def set_data_path(self):
         messagebox.showinfo("设置路径", "请选择游戏目录下的 data 文件夹。")
@@ -1440,23 +1643,52 @@ class App:
                     rows.append((parts[0].replace("***", f"{i:03d}"), parts[1].replace("***", f"{i:03d}"), f"{parts[2]}{i:03d}"))
         return rows
 
+    def grid_cell_values(self, base, deltas, current=None):
+        values = []
+        for delta in deltas:
+            value = max(1, base + delta)
+            if value not in values:
+                values.append(value)
+        if current is not None and int(current) not in values:
+            values.append(int(current))
+        return values
+
+    def grid_cell_size(self):
+        return max(1, int(self.grid_cell_w.get())), max(1, int(self.grid_cell_h.get()))
+
+    def on_grid_cell_size_changed(self, event=None):
+        self.write_view_config()
+        self.draw_grid(clear_cache=False)
+
+    def on_per_row_changed(self, event=None):
+        self.write_view_config()
+        self.draw_grid(clear_cache=False)
+
     def build_ui(self):
         top = ttk.Frame(self.root)
         top.pack(fill=tk.X, padx=6, pady=4)
         ttk.Button(top, text="设置data路径", command=self.set_data_path).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Label(top, textvariable=self.path_var, width=42, anchor="w").pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(top, text="打开data目录", command=self.open_data_dir).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(top, text="单元宽度").pack(side=tk.LEFT)
+        cell_w_combo = ttk.Combobox(top, textvariable=self.grid_cell_w, values=self.unit_width_values, width=5, state="readonly")
+        cell_w_combo.pack(side=tk.LEFT, padx=4)
+        bind_combobox_home_end(cell_w_combo, self.on_grid_cell_size_changed)
+        ttk.Label(top, text="单元高度").pack(side=tk.LEFT)
+        cell_h_combo = ttk.Combobox(top, textvariable=self.grid_cell_h, values=self.unit_height_values, width=5, state="readonly")
+        cell_h_combo.pack(side=tk.LEFT, padx=4)
+        bind_combobox_home_end(cell_h_combo, self.on_grid_cell_size_changed)
         ttk.Label(top, text="每行贴图").pack(side=tk.LEFT)
-        per_combo = ttk.Combobox(top, textvariable=self.per_row, values=[5, 8, 10, 12, 16, 20], width=5, state="readonly")
+        per_combo = ttk.Combobox(top, textvariable=self.per_row, values=self.per_row_values, width=5, state="readonly")
         per_combo.pack(side=tk.LEFT, padx=4)
-        per_combo.bind("<<ComboboxSelected>>", lambda e: self.draw_grid(clear_cache=False))
-        self.combo = ttk.Combobox(top, textvariable=self.file_choice, values=[f"{a},{b},{c}" for a, b, c in self.files], width=38)
+        bind_combobox_home_end(per_combo, self.on_per_row_changed)
+        self.combo = ttk.Combobox(top, textvariable=self.file_choice, values=[f"{a},{b},{c}" for a, b, c in self.files], width=30)
         self.combo.pack(side=tk.LEFT, padx=6)
-        self.combo.bind("<<ComboboxSelected>>", lambda e: self.fill_selected_file())
+        bind_combobox_home_end(self.combo, self.fill_selected_file)
         ttk.Label(top, text="IDX").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.idx_var, width=16).pack(side=tk.LEFT, padx=3)
+        ttk.Entry(top, textvariable=self.idx_var, width=13).pack(side=tk.LEFT, padx=3)
         ttk.Label(top, text="GRP").pack(side=tk.LEFT)
-        ttk.Entry(top, textvariable=self.grp_var, width=16).pack(side=tk.LEFT, padx=3)
+        ttk.Entry(top, textvariable=self.grp_var, width=13).pack(side=tk.LEFT, padx=3)
         ttk.Button(top, text="贴图查看", command=self.load_archive).pack(side=tk.LEFT, padx=6)
         ttk.Button(top, text="保存", command=self.save_archive).pack(side=tk.LEFT)
         ttk.Button(top, text="关于", command=self.about).pack(side=tk.RIGHT)
@@ -1481,8 +1713,8 @@ class App:
         for label, cmd in [
             ("编辑贴图", self.edit_selected),
             ("颜色转换", self.color_convert_selected),
-            ("选中图片导出PNG", self.export_selected),
-            ("选中图片导入PNG", self.import_selected),
+            ("选中贴图导出PNG", self.export_selected),
+            ("选中贴图导入PNG", self.import_selected),
             ("批量调整X/Y偏移", self.batch_adjust_offset),
             ("批量修改宽度/高度", self.batch_resize_selected),
             ("删除选中贴图", self.delete_selected),
@@ -1497,6 +1729,11 @@ class App:
             ("粘贴贴图(带偏移)", self.paste_sprite_with_offset),
             ("插入空白贴图(当前贴图前)", self.insert_blank_before),
             ("添加空白贴图到最后", self.append_blank_sprite),
+            ("水平翻转", self.flip_selected_horizontal),
+            ("复制并插入到最后", self.copy_selected_to_end),
+            ("复制并倒序插入到最后", self.copy_selected_reversed_to_end),
+            ("选中贴图向前移位", self.shift_selected_forward),
+            ("选中贴图向后移位", self.shift_selected_backward),
         ]:
             self.menu.add_command(label=label, command=cmd)
         self.menu.add_separator()
@@ -1614,7 +1851,8 @@ class App:
         if clear_cache:
             self.invalidate_thumb()
         per = max(1, int(self.per_row.get()))
-        cell_w, cell_h = self.cell_w, self.cell_h
+        cell_w, cell_h = self.grid_cell_size()
+        box_w, box_h = max(1, cell_w - 8), max(1, cell_h - 8)
         total = len(self.archive.sprites)
         rows = (total + per - 1) // per
         self.canvas.config(scrollregion=(0, 0, per * cell_w, max(1, rows) * cell_h))
@@ -1634,11 +1872,11 @@ class App:
                 self.canvas.create_text(x, y, text=str(i), fill="yellow", anchor="nw", font=("Arial", 11, "bold"))
                 self.canvas.create_image(x + 22, y + 18, image=photo, anchor="nw")
                 if i in self.selection:
-                    self.canvas.create_rectangle(x, y, x + cell_w - 8, y + cell_h - 8, outline="red", width=2)
+                    self.canvas.create_rectangle(x, y, x + box_w, y + box_h, outline="red", width=2)
 
     def index_at(self, event):
         per = max(1, int(self.per_row.get()))
-        cell_w, cell_h = self.cell_w, self.cell_h
+        cell_w, cell_h = self.grid_cell_size()
         x = self.canvas.canvasx(event.x)
         y = self.canvas.canvasy(event.y)
         idx = int(y // cell_h) * per + int(x // cell_w)
@@ -1709,18 +1947,63 @@ class App:
         count = len(self.selection)
         single = count == 1
         has_selection = count > 0
-        for label in ["选中图片导出PNG", "选中图片导入PNG", "批量调整X/Y偏移", "批量修改宽度/高度", "删除选中贴图"]:
+        for label in ["选中贴图导出PNG", "选中贴图导入PNG", "批量调整X/Y偏移", "批量修改宽度/高度", "删除选中贴图"]:
+            self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
+        for label in ["水平翻转", "复制并插入到最后", "复制并倒序插入到最后"]:
             self.menu.entryconfigure(label, state=tk.NORMAL if has_selection else tk.DISABLED)
         for label in ["复制到剪贴板", "复制到剪贴板(带偏移十字)", "从剪贴板粘贴", "复制贴图(带偏移)", "插入空白贴图(当前贴图前)"]:
             self.menu.entryconfigure(label, state=tk.NORMAL if single else tk.DISABLED)
-        self.menu.entryconfigure("粘贴贴图(带偏移)", state=tk.NORMAL if single and self.sprite_clipboard else tk.DISABLED)
+        self.menu.entryconfigure("粘贴贴图(带偏移)", state=tk.NORMAL if single and self.has_sprite_clipboard() else tk.DISABLED)
         self.menu.entryconfigure("添加空白贴图到最后", state=tk.NORMAL if self.archive else tk.DISABLED)
+        self.menu.entryconfigure("选中贴图向前移位", state=tk.NORMAL if self.can_shift_selected(-1) else tk.DISABLED)
+        self.menu.entryconfigure("选中贴图向后移位", state=tk.NORMAL if self.can_shift_selected(1) else tk.DISABLED)
 
     def selected_index(self):
         return min(self.selection) if self.selection else 0
 
     def selected_indices(self):
         return sorted(self.selection)
+
+    def encode_sprite_clipboard_text(self, sprite):
+        raw = JyPicArchive.encode_one(self.archive, sprite)
+        return SPRITE_CLIPBOARD_PREFIX + base64.b64encode(raw).decode("ascii")
+
+    def decode_sprite_clipboard_text(self, text):
+        text = (text or "").strip()
+        if not text.startswith(SPRITE_CLIPBOARD_PREFIX):
+            return None
+        try:
+            raw = base64.b64decode(text[len(SPRITE_CLIPBOARD_PREFIX):], validate=True)
+            return self.archive.decode_one(raw)
+        except Exception:
+            return None
+
+    def clipboard_sprite_with_offset(self):
+        try:
+            spr = self.decode_sprite_clipboard_text(self.root.clipboard_get())
+            if spr:
+                return spr
+        except tk.TclError:
+            pass
+        if self.sprite_clipboard:
+            return clone_sprite(self.sprite_clipboard)
+        return None
+
+    def has_sprite_clipboard(self):
+        if self.sprite_clipboard:
+            return True
+        try:
+            return self.decode_sprite_clipboard_text(self.root.clipboard_get()) is not None
+        except tk.TclError:
+            return False
+
+    def can_shift_selected(self, direction):
+        if not self.archive or not self.selection:
+            return False
+        total = len(self.archive.sprites)
+        if direction < 0:
+            return any(i > 0 and i - 1 not in self.selection for i in self.selection)
+        return any(i + 1 < total and i + 1 not in self.selection for i in self.selection)
 
     def edit_selected(self):
         if self.archive and self.archive.sprites:
@@ -1836,12 +2119,21 @@ class App:
         if not self.archive or len(self.selection) != 1:
             return
         self.sprite_clipboard = clone_sprite(self.archive.get_sprite(self.selected_index()))
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.encode_sprite_clipboard_text(self.sprite_clipboard))
+        except tk.TclError as e:
+            messagebox.showerror("复制失败", str(e))
 
     def paste_sprite_with_offset(self):
-        if not self.archive or len(self.selection) != 1 or not self.sprite_clipboard:
+        if not self.archive or len(self.selection) != 1:
+            return
+        pasted = self.clipboard_sprite_with_offset()
+        if not pasted:
+            messagebox.showerror("粘贴失败", "剪贴板中没有可识别的贴图数据。")
             return
         idx = self.selected_index()
-        self.archive.set_sprite(idx, clone_sprite(self.sprite_clipboard))
+        self.archive.set_sprite(idx, pasted)
         self.invalidate_thumb(idx)
         self.mark_dirty()
         self.draw_grid(clear_cache=False)
@@ -1863,6 +2155,62 @@ class App:
         self.archive.append_many([blank_sprite()])
         self.selection = {idx}
         self.last_selected_index = idx
+        self.mark_dirty()
+        self.draw_grid(clear_cache=True)
+
+    def flip_selected_horizontal(self):
+        if not self.archive or not self.selection:
+            return
+        for idx in self.selected_indices():
+            spr = self.archive.get_sprite(idx)
+            spr.pixels = [list(reversed(row)) for row in spr.pixels]
+            spr.xoff = spr.width - 1 - spr.xoff
+            self.archive.raw_entries[idx] = None
+            self.invalidate_thumb(idx)
+        self.mark_dirty()
+        self.draw_grid(clear_cache=False)
+
+    def copy_selected_to_end(self):
+        self.copy_selected_to_end_impl(reverse=False)
+
+    def copy_selected_reversed_to_end(self):
+        self.copy_selected_to_end_impl(reverse=True)
+
+    def copy_selected_to_end_impl(self, reverse=False):
+        if not self.archive or not self.selection:
+            return
+        indexes = self.selected_indices()
+        if reverse:
+            indexes = list(reversed(indexes))
+        start = len(self.archive.sprites)
+        copies = [clone_sprite(self.archive.get_sprite(i)) for i in indexes]
+        self.archive.append_many(copies)
+        self.selection = set(range(start, start + len(copies)))
+        self.last_selected_index = start + len(copies) - 1 if copies else None
+        self.mark_dirty()
+        self.draw_grid(clear_cache=True)
+
+    def shift_selected_forward(self):
+        self.shift_selected(-1)
+
+    def shift_selected_backward(self):
+        self.shift_selected(1)
+
+    def shift_selected(self, direction):
+        if not self.archive or not self.can_shift_selected(direction):
+            return
+        selected = set(self.selection)
+        order = sorted(selected) if direction < 0 else sorted(selected, reverse=True)
+        for idx in order:
+            target = idx + direction
+            if target < 0 or target >= len(self.archive.sprites) or target in selected:
+                continue
+            self.archive.sprites[idx], self.archive.sprites[target] = self.archive.sprites[target], self.archive.sprites[idx]
+            self.archive.raw_entries[idx], self.archive.raw_entries[target] = self.archive.raw_entries[target], self.archive.raw_entries[idx]
+            selected.remove(idx)
+            selected.add(target)
+        self.selection = selected
+        self.last_selected_index = min(selected) if direction < 0 else max(selected)
         self.mark_dirty()
         self.draw_grid(clear_cache=True)
 
@@ -1970,6 +2318,7 @@ class App:
         x = max(self.root.winfo_rootx(), self.root.winfo_rootx() + 80)
         y = max(self.root.winfo_rooty(), self.root.winfo_rooty() + 80)
         win.geometry(f"+{x}+{y}")
+        focus_window(win)
 
     def close(self):
         if self.confirm_archive_switch():
