@@ -27,7 +27,6 @@ The project was created because the older editor sFishedit (SFE) is useful but i
 - Expanded the context menu with horizontal flip, copy selected sprites to end, copy selected sprites to end in reverse order, and shift selected sprites forward/backward.
 - "复制贴图(带偏移)" now supports copy/paste across two JYIMGEditor processes while preserving dimensions, pixels, and X/Y offsets, using only the standard library.
 - Fixed original archive decoding so `#606060` is no longer mistaken for transparency. Original `idx/grp` transparency comes only from RLE skips or unencoded areas.
-- Removed the default `frostbite.idx/frostbite.grp` frozen-effect entry from `config.ini`; later `File` entries have been shifted forward.
 
 ## Screenshots
 
