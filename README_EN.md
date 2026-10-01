@@ -6,6 +6,14 @@ The project was created because the older editor sFishedit (SFE) is useful but i
 
 [中文说明](README.md)
 
+## Version 0.6 Highlights
+
+- **Transparent backgrounds for selected PNG export**: enable “导出为透明背景色” in the PNG export dialog to convert the rendered `#307070` background to alpha 0. Works with single images, 4/9/16-tile grids, and all 1/2/4/8/16× scales. Disabled by default.
+- **Low-alpha transparency handling**: PNG import and clipboard image conversion treat alpha values ≤8 (out of 255) as transparent. Values ≥9 still map to palette colors. GIF import retains its existing rules.
+- **Numeric ordering for selected PNG import without a manifest**: numeric names sort as `1, 2, 10`; exported single sprites sort by index; grid pages sort by page number; other numeric names sort by their first integer. When `manifest.csv` exists, its row order remains authoritative.
+
+To upgrade, replace only `JYIMGEditor.exe` and retain your existing `config.ini`. No archive-format or configuration migration is required. Keep `manifest.csv` for grid round trips. PNG filenames and manifest columns gain no transparency flag; transparency is stored in the PNG alpha channel.
+
 ## Version 0.5 Highlights
 
 - Selected-sprite PNG export now supports **scale factors** (1/2/4/8/16×) and **grid layouts** (4-in-1 / 9-in-1 / 16-in-1), with a `manifest.csv` recording per-tile offsets. Import automatically reconstructs from the manifest or filename.

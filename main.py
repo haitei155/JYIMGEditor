@@ -20,7 +20,7 @@ from PIL import Image, ImageGrab
 
 
 APP_NAME = "金庸群侠传贴图资源编辑器"
-APP_VERSION = "v0.5"
+APP_VERSION = "v0.6"
 AUTHOR = "海底.zip"
 BG = "#307070"
 APP_USER_MODEL_ID = "haitei155.JYIMGEditor"
@@ -661,11 +661,15 @@ class ImageTools:
         w, h = img.size
         pixels = []
         tr = palette.transparent_rgb
+        # Some clipboard sources (and alpha conversions) may produce very small
+        # alpha values instead of strict 0 for fully transparent pixels.
+        ALPHA_TRANSPARENT_THRESHOLD = 8
         for y in range(h):
             row = []
             for x in range(w):
                 r, g, b, a = img.getpixel((x, y))
-                if a == 0 or (r, g, b) == tr:
+                rgb = (r, g, b)
+                if a <= ALPHA_TRANSPARENT_THRESHOLD or rgb == tr:
                     row.append(-1)
                 else:
                     row.append(palette.nearest((r, g, b)))
@@ -1659,6 +1663,7 @@ class ExportSelectedDialog(simpledialog.Dialog):
         self.title("导出PNG选项")
         self.scale = tk.IntVar(value=1)
         self.layout = tk.StringVar(value="single")
+        self.transparent = tk.BooleanVar(value=False)
         ttk.Label(master, text="导出倍数").grid(row=0, column=0, sticky="w", padx=4, pady=4)
         scale_combo = ttk.Combobox(master, textvariable=self.scale, values=EXPORT_SCALES, width=6, state="readonly")
         scale_combo.grid(row=0, column=1, sticky="w", padx=4, pady=4)
@@ -1671,10 +1676,11 @@ class ExportSelectedDialog(simpledialog.Dialog):
         ttk.Radiobutton(box, text="9拼1", variable=self.layout, value="grid9").pack(anchor="w")
         ttk.Radiobutton(box, text="16拼1", variable=self.layout, value="grid16").pack(anchor="w")
         ttk.Label(master, text="拼图模式按 X+Y 偏移固定点导出，无额外边缘 padding。").grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(4, 0))
+        ttk.Checkbutton(master, text="导出为透明背景色", variable=self.transparent).grid(row=3, column=0, columnspan=2, sticky="w", padx=4, pady=4)
         return scale_combo
 
     def apply(self):
-        self.result = {"scale": int(self.scale.get()), "layout": self.layout.get()}
+        self.result = {"scale": int(self.scale.get()), "layout": self.layout.get(), "transparent": bool(self.transparent.get())}
 
 
 class ImportSelectedDialog(simpledialog.Dialog):
@@ -2923,6 +2929,7 @@ class App:
             return
         scale = max(1, int(dlg.result["scale"]))
         layout = dlg.result["layout"]
+        transparent_bg = bool(dlg.result.get("transparent", False))
         root = filedialog.askdirectory(title="选择导出文件夹")
         if not root:
             return
@@ -2932,13 +2939,23 @@ class App:
         manifest = outdir / "manifest.csv"
         fields = ["index", "file", "width", "height", "xoff", "yoff", "scale", "layout", "page_file", "tile_slot", "cell_width", "cell_height", "cell_xoff", "cell_yoff"]
         selected = [(i, self.archive.get_sprite(i)) for i in self.selected_indices()]
+        bg_tr = Palette.parse_hex(BG)
         with manifest.open("w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fields)
             writer.writeheader()
             if layout == "single":
                 for i, spr in selected:
                     name = f"{self.current_base}_{i:0{digits}d}_x{spr.xoff}_y{spr.yoff}_s{scale}.png"
-                    ImageTools.export_png(outdir / name, spr, self.palette, False, scale)
+                    img = ImageTools.sprite_to_pil(spr, self.palette, False, scale)
+                    if transparent_bg:
+                        img = img.convert("RGBA")
+                        px = img.load()
+                        for y in range(img.height):
+                            for x in range(img.width):
+                                r, g, b, a = px[x, y]
+                                if (r, g, b) == bg_tr:
+                                    px[x, y] = (r, g, b, 0)
+                    img.save(outdir / name, "PNG")
                     writer.writerow({
                         "index": i, "file": name, "width": spr.width, "height": spr.height,
                         "xoff": spr.xoff, "yoff": spr.yoff, "scale": scale, "layout": "single",
@@ -2956,12 +2973,26 @@ class App:
                     chunk = selected[page_index:page_index + per_page]
                     page_no = page_index // per_page
                     page_name = f"{self.current_base}_{layout}_page{page_no:03d}_x{left}_y{top}_s{scale}.png"
-                    page = Image.new("RGB", (cell_w * cols * scale, cell_h * rows * scale), Palette.parse_hex(BG))
+                    if transparent_bg:
+                        page = Image.new("RGBA", (cell_w * cols * scale, cell_h * rows * scale), (*bg_tr, 0))
+                    else:
+                        page = Image.new("RGB", (cell_w * cols * scale, cell_h * rows * scale), bg_tr)
                     for slot, (i, spr) in enumerate(chunk):
                         tile = ImageTools.sprite_to_pil(spr, self.palette, False, scale, True, margins)
+                        if transparent_bg:
+                            tile = tile.convert("RGBA")
+                            px = tile.load()
+                            for y in range(tile.height):
+                                for x in range(tile.width):
+                                    r, g, b, a = px[x, y]
+                                    if (r, g, b) == bg_tr:
+                                        px[x, y] = (r, g, b, 0)
                         x = (slot % cols) * cell_w * scale
                         y = (slot // cols) * cell_h * scale
-                        page.paste(tile, (x, y))
+                        if transparent_bg:
+                            page.paste(tile, (x, y), tile)
+                        else:
+                            page.paste(tile, (x, y))
                         writer.writerow({
                             "index": i, "file": f"{page_name}#slot{slot}", "width": spr.width, "height": spr.height,
                             "xoff": spr.xoff, "yoff": spr.yoff, "scale": scale, "layout": layout,
@@ -3167,7 +3198,27 @@ class App:
                             yoff = int(row.get("yoff") or 0)
                         imported.append((img, xoff, yoff, scale))
             else:
-                for path in sorted(folder.glob("*.png"), key=lambda p: p.name.lower()):
+                def png_sort_key(p: Path):
+                    name = p.name.lower()
+                    stem = p.stem.lower()
+                    # Numeric-only names: "0.png"..."123.png"
+                    if stem.isdigit():
+                        return (0, int(stem))
+                    # Exported grid pages: "..._grid4_page{n:03d}_x..._y..._s{scale}.png"
+                    m_grid = re.search(r"_grid(4|9|16)_page(\d+)", name)
+                    if m_grid:
+                        return (2, int(m_grid.group(2)))
+                    # Exported single images: "..._{i:0Nd}_x{...}_y{...}_s{...}.png"
+                    m_single = re.search(r"_(\d+)_x-?\d+_y-?\d+_s\d+", name)
+                    if m_single:
+                        return (1, int(m_single.group(1)))
+                    # Fallback: extract any first integer so "file10.png" still orders reasonably.
+                    m_any = re.search(r"(\d+)", name)
+                    if m_any:
+                        return (3, int(m_any.group(1)))
+                    return (4, name)
+
+                for path in sorted(folder.glob("*.png"), key=png_sort_key):
                     name = path.name.lower()
                     scale = int(forced_scale or self.parse_scale_from_name(path))
                     xy = self.parse_xy_from_name(path)
